@@ -1,0 +1,43 @@
+[package]
+name = "previz"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Minimal Filament renderer proof of concept"
+build = "build.rs"
+
+[[bin]]
+name = "previz"
+path = "src/main.rs"
+
+[dependencies]
+# Latest stable winit for windowing (0.30.x)
+winit = "0.30"
+
+# For platform-specific window handles
+raw-window-handle = "0.6"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Math types
+glam = "0.29"
+
+[build-dependencies]
+# For downloading Filament release
+ureq = "2.12"
+
+# For extracting tgz
+flate2 = "1.1"
+tar = "0.4"
+
+# For C++ compilation
+cc = "1.2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = true
+codegen-units = 1
