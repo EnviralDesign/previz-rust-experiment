@@ -103,15 +103,23 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <filament/SwapChain.h>
 #include <filament/Material.h>
 #include <filament/MaterialInstance.h>
+#include <filament/LightManager.h>
+#include <filament/Box.h>
 #include <filament/VertexBuffer.h>
 #include <filament/IndexBuffer.h>
 #include <filament/RenderableManager.h>
 #include <filament/TransformManager.h>
+#include <gltfio/AssetLoader.h>
+#include <gltfio/FilamentAsset.h>
+#include <gltfio/MaterialProvider.h>
+#include <gltfio/ResourceLoader.h>
+#include <gltfio/TextureProvider.h>
 #include <utils/EntityManager.h>
 #include <backend/DriverEnums.h>
 
 using namespace filament;
 using namespace utils;
+using namespace filament::gltfio;
 
 extern "C" {
 
@@ -487,6 +495,136 @@ void filament_renderable_builder_build(RenderableBuilderWrapper* wrapper, Engine
     wrapper->builder->build(*engine, entity);
 }
 
+// ============================================================================
+// Lights
+// ============================================================================
+
+int32_t filament_light_create_directional(
+    Engine* engine,
+    EntityManager* em,
+    float color_r,
+    float color_g,
+    float color_b,
+    float intensity,
+    float dir_x,
+    float dir_y,
+    float dir_z
+) {
+    Entity entity = em->create();
+    LightManager::Builder(LightManager::Type::DIRECTIONAL)
+        .color({color_r, color_g, color_b})
+        .intensity(intensity)
+        .direction({dir_x, dir_y, dir_z})
+        .castShadows(true)
+        .build(*engine, entity);
+    return Entity::smuggle(entity);
+}
+
+// ============================================================================
+// gltfio
+// ============================================================================
+
+MaterialProvider* filament_gltfio_create_jit_shader_provider(Engine* engine, bool optimize) {
+    return createJitShaderProvider(engine, optimize);
+}
+
+void filament_gltfio_material_provider_destroy_materials(MaterialProvider* provider) {
+    if (provider) {
+        provider->destroyMaterials();
+    }
+}
+
+void filament_gltfio_destroy_material_provider(MaterialProvider* provider) {
+    delete provider;
+}
+
+AssetLoader* filament_gltfio_asset_loader_create(
+    Engine* engine,
+    MaterialProvider* materials,
+    EntityManager* entities
+) {
+    AssetConfiguration config{};
+    config.engine = engine;
+    config.materials = materials;
+    config.entities = entities;
+    return AssetLoader::create(config);
+}
+
+void filament_gltfio_asset_loader_destroy(AssetLoader* loader) {
+    AssetLoader::destroy(&loader);
+}
+
+FilamentAsset* filament_gltfio_asset_loader_create_asset_from_json(
+    AssetLoader* loader,
+    const uint8_t* data,
+    uint32_t size
+) {
+    return loader->createAsset(data, size);
+}
+
+void filament_gltfio_asset_loader_destroy_asset(AssetLoader* loader, FilamentAsset* asset) {
+    loader->destroyAsset(asset);
+}
+
+ResourceLoader* filament_gltfio_resource_loader_create(
+    Engine* engine,
+    const char* gltf_path,
+    bool normalize_skinning_weights
+) {
+    ResourceConfiguration config{engine, gltf_path, normalize_skinning_weights};
+    return new ResourceLoader(config);
+}
+
+void filament_gltfio_resource_loader_destroy(ResourceLoader* loader) {
+    delete loader;
+}
+
+bool filament_gltfio_resource_loader_load_resources(ResourceLoader* loader, FilamentAsset* asset) {
+    return loader->loadResources(asset);
+}
+
+void filament_gltfio_resource_loader_add_texture_provider(
+    ResourceLoader* loader,
+    const char* mime_type,
+    TextureProvider* provider
+) {
+    loader->addTextureProvider(mime_type, provider);
+}
+
+TextureProvider* filament_gltfio_create_stb_texture_provider(Engine* engine) {
+    return createStbProvider(engine);
+}
+
+void filament_gltfio_destroy_texture_provider(TextureProvider* provider) {
+    delete provider;
+}
+
+void filament_gltfio_asset_add_entities_to_scene(FilamentAsset* asset, Scene* scene) {
+    auto entities = asset->getEntities();
+    auto count = asset->getEntityCount();
+    scene->addEntities(entities, count);
+}
+
+void filament_gltfio_asset_release_source_data(FilamentAsset* asset) {
+    asset->releaseSourceData();
+}
+
+void filament_gltfio_asset_get_bounding_box(
+    FilamentAsset* asset,
+    float* center_xyz,
+    float* extent_xyz
+) {
+    filament::Aabb box = asset->getBoundingBox();
+    auto c = box.center();
+    auto e = box.extent();
+    center_xyz[0] = c.x;
+    center_xyz[1] = c.y;
+    center_xyz[2] = c.z;
+    extent_xyz[0] = e.x;
+    extent_xyz[1] = e.y;
+    extent_xyz[2] = e.z;
+}
+
 } // extern "C"
 "#;
 
@@ -538,7 +676,7 @@ fn generate_rust_bindings() -> String {
 // These bindings are manually crafted to match our C++ wrapper functions.
 // We avoid bindgen because Filament's headers use complex C++ templates.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 
 // Opaque pointer types for Filament objects
 pub type Engine = c_void;
@@ -554,6 +692,11 @@ pub type Material = c_void;
 pub type MaterialInstance = c_void;
 pub type VertexBuffer = c_void;
 pub type IndexBuffer = c_void;
+pub type MaterialProvider = c_void;
+pub type AssetLoader = c_void;
+pub type ResourceLoader = c_void;
+pub type TextureProvider = c_void;
+pub type FilamentAsset = c_void;
 
 // Builder wrapper types (opaque)
 pub type MaterialBuilderWrapper = c_void;
@@ -801,6 +944,79 @@ extern "C" {
         engine: *mut Engine,
         entity: i32,
     );
+
+    // ========================================================================
+    // Lights
+    // ========================================================================
+    pub fn filament_light_create_directional(
+        engine: *mut Engine,
+        entity_manager: *mut EntityManager,
+        color_r: f32,
+        color_g: f32,
+        color_b: f32,
+        intensity: f32,
+        dir_x: f32,
+        dir_y: f32,
+        dir_z: f32,
+    ) -> i32;
+
+    // ========================================================================
+    // gltfio
+    // ========================================================================
+    pub fn filament_gltfio_create_jit_shader_provider(
+        engine: *mut Engine,
+        optimize: bool,
+    ) -> *mut MaterialProvider;
+    pub fn filament_gltfio_material_provider_destroy_materials(provider: *mut MaterialProvider);
+    pub fn filament_gltfio_destroy_material_provider(provider: *mut MaterialProvider);
+
+    pub fn filament_gltfio_asset_loader_create(
+        engine: *mut Engine,
+        materials: *mut MaterialProvider,
+        entities: *mut EntityManager,
+    ) -> *mut AssetLoader;
+    pub fn filament_gltfio_asset_loader_destroy(loader: *mut AssetLoader);
+    pub fn filament_gltfio_asset_loader_create_asset_from_json(
+        loader: *mut AssetLoader,
+        data: *const u8,
+        size: u32,
+    ) -> *mut FilamentAsset;
+    pub fn filament_gltfio_asset_loader_destroy_asset(
+        loader: *mut AssetLoader,
+        asset: *mut FilamentAsset,
+    );
+
+    pub fn filament_gltfio_resource_loader_create(
+        engine: *mut Engine,
+        gltf_path: *const c_char,
+        normalize_skinning_weights: bool,
+    ) -> *mut ResourceLoader;
+    pub fn filament_gltfio_resource_loader_destroy(loader: *mut ResourceLoader);
+    pub fn filament_gltfio_resource_loader_load_resources(
+        loader: *mut ResourceLoader,
+        asset: *mut FilamentAsset,
+    ) -> bool;
+    pub fn filament_gltfio_resource_loader_add_texture_provider(
+        loader: *mut ResourceLoader,
+        mime_type: *const c_char,
+        provider: *mut TextureProvider,
+    );
+
+    pub fn filament_gltfio_create_stb_texture_provider(
+        engine: *mut Engine,
+    ) -> *mut TextureProvider;
+    pub fn filament_gltfio_destroy_texture_provider(provider: *mut TextureProvider);
+
+    pub fn filament_gltfio_asset_add_entities_to_scene(
+        asset: *mut FilamentAsset,
+        scene: *mut Scene,
+    );
+    pub fn filament_gltfio_asset_release_source_data(asset: *mut FilamentAsset);
+    pub fn filament_gltfio_asset_get_bounding_box(
+        asset: *mut FilamentAsset,
+        center_xyz: *mut f32,
+        extent_xyz: *mut f32,
+    );
 }
 "#.to_string()
 }
@@ -873,9 +1089,16 @@ fn main() {
         "filabridge",
         "filaflat",
         "filamat",       // Material system (includes MaterialParser)
+        "gltfio",
+        "gltfio_core",
         "geometry",
         "ibl",
         "ibl-lite",
+        "image",
+        "ktxreader",
+        "stb",
+        "dracodec",
+        "meshoptimizer",
         "utils",
         "smol-v",
         "shaders",       // Shader management
@@ -904,6 +1127,14 @@ fn main() {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("assets")
             .join("bakedColor.mat")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("assets")
+            .join("gltf")
+            .join("DamagedHelmet.gltf")
             .display()
     );
 }

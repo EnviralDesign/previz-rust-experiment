@@ -7,7 +7,7 @@ A minimal Rust application demonstrating Google Filament renderer integration on
 This is a "hello world" proof of concept that:
 - Creates a native Windows window using `winit`
 - Initializes the Filament rendering engine with OpenGL backend
-- Renders a simple colored triangle with vertex colors
+- Loads and renders a glTF model with a directional light
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ The first build will take a while as it downloads the prebuilt Filament binaries
 cargo run
 ```
 
-You should see a window with a colorful triangle (red, green, blue vertices) on a dark blue background.
+You should see a window rendering the DamagedHelmet glTF with a directional light.
 
 Press **ESC** or close the window to exit.
 
@@ -41,7 +41,9 @@ previz-rust-experiment/
 ├── src/
 │   └── main.rs          # Main application code
 └── assets/
-    └── bakedColor.mat    # Material source compiled at build time
+    ├── bakedColor.mat           # Material source compiled at build time
+    └── gltf/
+        └── DamagedHelmet.gltf   # Sample glTF asset (embedded data URIs)
 ```
 
 ## Technical Notes
@@ -64,7 +66,7 @@ Filament's `matc` tool from the downloaded release.
 ## Next Steps
 
 This POC sets the foundation for:
-1. Loading 3D models (using Filament's `filameshio` or `gltfio`)
+1. Loading 3D models (using Filament's `gltfio`)
 2. Adding lighting (sun lights, IBL)
 3. Creating custom materials
 4. Building a full application/UI framework

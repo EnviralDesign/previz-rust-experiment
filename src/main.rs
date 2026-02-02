@@ -11,10 +11,11 @@
 mod ffi;
 mod filament;
 
-use filament::{
-    Backend, ElementType, Engine, Entity, IndexType, PrimitiveType, VertexAttribute,
-};
+use filament::{Backend, Engine, Entity};
 use std::ffi::c_void;
+use std::path::PathBuf;
+use std::time::Instant;
+use std::time::Duration;
 use std::sync::Arc;
 
 use winit::{
@@ -29,8 +30,7 @@ use winit::{
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-// Baked color material compiled during build with Filament's matc
-const MATERIAL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bakedColor.filamat"));
+const GLTF_PATH: &str = "assets/gltf/DamagedHelmet.gltf";
 
 /// Get the native window handle (HWND) on Windows
 #[cfg(target_os = "windows")]
@@ -49,7 +49,33 @@ struct App {
     view: Option<filament::View>,
     scene: Option<filament::Scene>,
     camera: Option<filament::Camera>,
-    triangle_entity: Option<Entity>,
+    gltf_asset: Option<filament::GltfAsset>,
+    gltf_asset_loader: Option<filament::GltfAssetLoader>,
+    gltf_resource_loader: Option<filament::GltfResourceLoader>,
+    gltf_texture_provider: Option<filament::GltfTextureProvider>,
+    gltf_material_provider: Option<filament::GltfMaterialProvider>,
+    directional_light: Option<Entity>,
+    camera_position: [f32; 3],
+    camera_yaw: f32,
+    camera_pitch: f32,
+    move_forward: bool,
+    move_backward: bool,
+    move_left: bool,
+    move_right: bool,
+    move_up: bool,
+    move_down: bool,
+    aim_left: bool,
+    aim_right: bool,
+    aim_up: bool,
+    aim_down: bool,
+    last_frame_time: Option<Instant>,
+    last_fps_time: Instant,
+    frame_count: u32,
+    frame_dt: f32,
+    render_ms: f32,
+    base_title: String,
+    target_frame_duration: Duration,
+    next_frame_time: Instant,
     engine: Option<Engine>,
     close_requested: bool,
 }
@@ -63,7 +89,33 @@ impl App {
             view: None,
             scene: None,
             camera: None,
-            triangle_entity: None,
+            gltf_asset: None,
+            gltf_asset_loader: None,
+            gltf_resource_loader: None,
+            gltf_texture_provider: None,
+            gltf_material_provider: None,
+            directional_light: None,
+            camera_position: [0.0, 0.0, 3.0],
+            camera_yaw: 0.6,
+            camera_pitch: 0.3,
+            move_forward: false,
+            move_backward: false,
+            move_left: false,
+            move_right: false,
+            move_up: false,
+            move_down: false,
+            aim_left: false,
+            aim_right: false,
+            aim_up: false,
+            aim_down: false,
+            last_frame_time: None,
+            last_fps_time: Instant::now(),
+            frame_count: 0,
+            frame_dt: 1.0 / 60.0,
+            render_ms: 0.0,
+            base_title: "Previz - Filament v1.69.0 glTF".to_string(),
+            target_frame_duration: Duration::from_millis(16),
+            next_frame_time: Instant::now(),
             engine: None,
             close_requested: false,
         }
@@ -126,21 +178,68 @@ impl App {
             .expect("Failed to create camera");
         log::info!("Camera created successfully");
 
-        // Setup orthographic camera (2D projection for simple triangle)
-        let aspect = window_size.width as f64 / window_size.height as f64;
-        let zoom = 1.5;
-        camera.set_projection_ortho(-aspect * zoom, aspect * zoom, -zoom, zoom, 0.0, 10.0);
-
         // Configure viewport
         view.set_viewport(0, 0, window_size.width, window_size.height);
-        view.set_post_processing_enabled(false);
         view.set_scene(&mut scene);
         view.set_camera(&mut camera);
 
-        // Create triangle
-        let triangle_entity = create_triangle(&mut engine, &mut entity_manager);
-        scene.add_entity(triangle_entity);
-        log::info!("Triangle entity created");
+        // Directional light for PBR shading
+        let light_entity = engine.create_directional_light(
+            &mut entity_manager,
+            [1.0, 1.0, 1.0],
+            100_000.0,
+            [0.0, -1.0, -0.5],
+        );
+        scene.add_entity(light_entity);
+
+        // Load glTF asset
+        let gltf_bytes = load_gltf_bytes();
+        let mut material_provider =
+            filament::GltfMaterialProvider::create_jit(&mut engine, false)
+                .expect("Failed to create gltf material provider");
+        let mut texture_provider =
+            filament::GltfTextureProvider::create_stb(&mut engine)
+                .expect("Failed to create stb texture provider");
+        let mut asset_loader = filament::GltfAssetLoader::create(
+            &mut engine,
+            &mut material_provider,
+            &mut entity_manager,
+        )
+        .expect("Failed to create gltf asset loader");
+        let mut resource_loader =
+            filament::GltfResourceLoader::create(&mut engine, None, true)
+                .expect("Failed to create gltf resource loader");
+        resource_loader.add_texture_provider("image/png", &mut texture_provider);
+        resource_loader.add_texture_provider("image/jpeg", &mut texture_provider);
+
+        let mut asset = asset_loader
+            .create_asset_from_json(&gltf_bytes)
+            .expect("Failed to parse gltf");
+        let loaded = resource_loader.load_resources(&mut asset);
+        if !loaded {
+            panic!("Failed to load gltf resources");
+        }
+        asset.release_source_data();
+        asset.add_entities_to_scene(&mut scene);
+
+        let aspect = window_size.width as f64 / window_size.height as f64;
+        let (center, extent) = asset.bounding_box();
+        let radius = extent[0].max(extent[1]).max(extent[2]);
+        let distance = if radius > 0.0 { radius * 3.0 } else { 3.0 };
+        self.camera_position = [
+            center[0] + distance,
+            center[1] + distance * 0.4,
+            center[2] + distance,
+        ];
+        let forward = [
+            center[0] - self.camera_position[0],
+            center[1] - self.camera_position[1],
+            center[2] - self.camera_position[2],
+        ];
+        (self.camera_yaw, self.camera_pitch) = forward_to_yaw_pitch(forward);
+        camera.set_projection_perspective(45.0, aspect, 0.1, 1000.0);
+        self.update_camera_look_at();
+        log::info!("glTF asset loaded and added to scene");
 
         // Store everything
         self.engine = Some(engine);
@@ -149,7 +248,12 @@ impl App {
         self.view = Some(view);
         self.scene = Some(scene);
         self.camera = Some(camera);
-        self.triangle_entity = Some(triangle_entity);
+        self.gltf_asset = Some(asset);
+        self.gltf_asset_loader = Some(asset_loader);
+        self.gltf_resource_loader = Some(resource_loader);
+        self.gltf_texture_provider = Some(texture_provider);
+        self.gltf_material_provider = Some(material_provider);
+        self.directional_light = Some(light_entity);
 
         log::info!("Filament initialization complete!");
     }
@@ -160,13 +264,149 @@ impl App {
             view.set_viewport(0, 0, new_size.width, new_size.height);
 
             let aspect = new_size.width as f64 / new_size.height as f64;
-            let zoom = 1.5;
-            camera.set_projection_ortho(-aspect * zoom, aspect * zoom, -zoom, zoom, 0.0, 10.0);
+            camera.set_projection_perspective(45.0, aspect, 0.1, 1000.0);
         }
+    }
+
+    fn update_camera_look_at(&mut self) {
+        let Some(camera) = &mut self.camera else {
+            return;
+        };
+
+        let yaw = self.camera_yaw;
+        let pitch = self.camera_pitch.clamp(-1.4, 1.4);
+        self.camera_pitch = pitch;
+
+        let cos_pitch = pitch.cos();
+        let dir = [
+            yaw.cos() * cos_pitch,
+            pitch.sin(),
+            yaw.sin() * cos_pitch,
+        ];
+        let eye = self.camera_position;
+        let center = [
+            eye[0] + dir[0],
+            eye[1] + dir[1],
+            eye[2] + dir[2],
+        ];
+        camera.look_at(eye, center, [0.0, 1.0, 0.0]);
+    }
+
+    fn nudge_camera(&mut self, yaw_delta: f32, pitch_delta: f32, zoom_delta: f32) {
+        self.camera_yaw += yaw_delta;
+        self.camera_pitch += pitch_delta;
+        if zoom_delta != 0.0 {
+            let (forward, _, _) = camera_basis(self.camera_yaw, self.camera_pitch);
+            self.camera_position[0] += forward[0] * zoom_delta;
+            self.camera_position[1] += forward[1] * zoom_delta;
+            self.camera_position[2] += forward[2] * zoom_delta;
+        }
+        self.update_camera_look_at();
+    }
+
+    fn move_camera_horizontal(&mut self, right: f32, up: f32, forward: f32) {
+        let yaw = self.camera_yaw;
+        let forward_dir = [yaw.cos(), 0.0, yaw.sin()];
+        let right_dir = [-yaw.sin(), 0.0, yaw.cos()];
+        let up_dir = [0.0, 1.0, 0.0];
+
+        self.camera_position[0] +=
+            right_dir[0] * right + up_dir[0] * up + forward_dir[0] * forward;
+        self.camera_position[1] +=
+            right_dir[1] * right + up_dir[1] * up + forward_dir[1] * forward;
+        self.camera_position[2] +=
+            right_dir[2] * right + up_dir[2] * up + forward_dir[2] * forward;
+        self.update_camera_look_at();
+    }
+
+    fn update_frame_timing(&mut self, now: Instant) {
+        let dt_duration = if let Some(last) = self.last_frame_time {
+            now.saturating_duration_since(last)
+        } else {
+            std::time::Duration::from_millis(16)
+        };
+        self.last_frame_time = Some(now);
+        self.frame_dt = dt_duration.as_secs_f32().max(0.0);
+
+        self.frame_count = self.frame_count.saturating_add(1);
+        let elapsed = now.saturating_duration_since(self.last_fps_time);
+        if elapsed.as_secs_f32() >= 0.5 {
+            let fps = self.frame_count as f32 / elapsed.as_secs_f32();
+            let ms = (self.frame_dt * 1000.0).max(0.0);
+            if let Some(window) = &self.window {
+                window.set_title(&format!(
+                    "{} - {:.1} fps (cadence {:.2} ms, render {:.2} ms)",
+                    self.base_title, fps, ms, self.render_ms
+                ));
+            }
+            self.frame_count = 0;
+            self.last_fps_time = now;
+        }
+    }
+
+    fn update_camera_movement(&mut self) {
+        let move_speed = 1.5 * self.frame_dt;
+        let aim_speed = 1.8 * self.frame_dt;
+
+        if self.aim_left {
+            self.camera_yaw -= aim_speed;
+        }
+        if self.aim_right {
+            self.camera_yaw += aim_speed;
+        }
+        if self.aim_up {
+            self.camera_pitch += aim_speed;
+        }
+        if self.aim_down {
+            self.camera_pitch -= aim_speed;
+        }
+
+        let mut forward = 0.0;
+        let mut right = 0.0;
+        let mut up = 0.0;
+        if self.move_forward {
+            forward += move_speed;
+        }
+        if self.move_backward {
+            forward -= move_speed;
+        }
+        if self.move_left {
+            right -= move_speed;
+        }
+        if self.move_right {
+            right += move_speed;
+        }
+        if self.move_up {
+            up += move_speed;
+        }
+        if self.move_down {
+            up -= move_speed;
+        }
+
+        if forward != 0.0 || right != 0.0 || up != 0.0 {
+            self.move_camera_horizontal(right, up, forward);
+        } else if self.aim_left || self.aim_right || self.aim_up || self.aim_down {
+            self.update_camera_look_at();
+        }
+    }
+
+    fn update_target_frame_duration(&mut self, window: &Window) {
+        let mut target = Duration::from_millis(16);
+        if let Some(monitor) = window.current_monitor() {
+            if let Some(millihz) = monitor.refresh_rate_millihertz() {
+                let hz = millihz as f32 / 1000.0;
+                if hz > 1.0 {
+                    target = Duration::from_secs_f32(1.0 / hz);
+                }
+            }
+        }
+        self.target_frame_duration = target;
+        self.next_frame_time = Instant::now() + self.target_frame_duration;
     }
 
     /// Render a frame
     fn render(&mut self) {
+        let frame_start = Instant::now();
         if let (Some(renderer), Some(swap_chain), Some(view)) =
             (&mut self.renderer, &mut self.swap_chain, &self.view)
         {
@@ -175,6 +415,13 @@ impl App {
                 renderer.end_frame();
             }
         }
+        let render_end = Instant::now();
+        self.render_ms = render_end
+            .saturating_duration_since(frame_start)
+            .as_secs_f32()
+            * 1000.0;
+        self.update_frame_timing(frame_start);
+        self.update_camera_movement();
     }
 }
 
@@ -187,7 +434,7 @@ impl ApplicationHandler for App {
         log::info!("Creating window...");
 
         let window_attrs = WindowAttributes::default()
-            .with_title("Previz - Filament v1.69.0 Hello World")
+            .with_title(self.base_title.clone())
             .with_inner_size(PhysicalSize::new(1280u32, 720u32))
             .with_resizable(true);
 
@@ -205,6 +452,7 @@ impl ApplicationHandler for App {
 
         // Initialize Filament
         self.init_filament(&window);
+        self.update_target_frame_duration(&window);
 
         self.window = Some(window);
     }
@@ -226,109 +474,117 @@ impl ApplicationHandler for App {
                     log::info!("Escape pressed, shutting down...");
                     self.close_requested = true;
                     event_loop.exit();
+                    return;
+                }
+                let pressed = event.state == winit::event::ElementState::Pressed;
+                match event.physical_key {
+                    PhysicalKey::Code(KeyCode::ArrowLeft) => self.aim_left = pressed,
+                    PhysicalKey::Code(KeyCode::ArrowRight) => self.aim_right = pressed,
+                    PhysicalKey::Code(KeyCode::ArrowUp) => self.aim_up = pressed,
+                    PhysicalKey::Code(KeyCode::ArrowDown) => self.aim_down = pressed,
+                    PhysicalKey::Code(KeyCode::KeyW) => self.move_forward = pressed,
+                    PhysicalKey::Code(KeyCode::KeyS) => self.move_backward = pressed,
+                    PhysicalKey::Code(KeyCode::KeyA) => self.move_left = pressed,
+                    PhysicalKey::Code(KeyCode::KeyD) => self.move_right = pressed,
+                    PhysicalKey::Code(KeyCode::Space) => self.move_up = pressed,
+                    PhysicalKey::Code(KeyCode::ControlLeft)
+                    | PhysicalKey::Code(KeyCode::ControlRight) => self.move_down = pressed,
+                    PhysicalKey::Code(KeyCode::Equal) => {
+                        if pressed {
+                            self.nudge_camera(0.0, 0.0, -0.3);
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::Minus) => {
+                        if pressed {
+                            self.nudge_camera(0.0, 0.0, 0.3);
+                        }
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::Resized(new_size) => {
                 log::debug!("Window resized to {}x{}", new_size.width, new_size.height);
                 self.handle_resize(new_size);
+                if let Some(window) = self.window.clone() {
+                    self.update_target_frame_duration(&window);
+                }
+            }
+            WindowEvent::Moved(_) => {
+                if let Some(window) = self.window.clone() {
+                    self.update_target_frame_duration(&window);
+                }
             }
             WindowEvent::RedrawRequested => {
                 self.render();
-                // Request another frame
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Request continuous redraws
-        if let Some(window) = &self.window {
-            window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now >= self.next_frame_time {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            self.next_frame_time = now + self.target_frame_duration;
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_time));
     }
 }
 
-/// Create a simple colored triangle with vertex colors
-fn create_triangle(
-    engine: &mut Engine,
-    entity_manager: &mut filament::EntityManager,
-) -> Entity {
-    // Triangle vertices (x, y) positions - equilateral triangle centered at origin
-    let triangle_positions: [f32; 6] = [
-        0.0, 0.866,  // Top vertex
-        -1.0, -0.5,  // Bottom left
-        1.0, -0.5,   // Bottom right
-    ];
-
-    // Vertex colors (RGBA packed as u32 in ABGR format)
-    let triangle_colors: [u32; 3] = [
-        0xFF0000FF, // Red (ABGR)
-        0xFF00FF00, // Green (ABGR)
-        0xFFFF0000, // Blue (ABGR)
-    ];
-
-    // Create vertex buffer with 2 attributes: position and color
-    let mut vertex_buffer = engine
-        .vertex_buffer_builder()
-        .vertex_count(3)
-        .buffer_count(2) // Separate buffers for position and color
-        .attribute(
-            VertexAttribute::Position,
-            0, // buffer index
-            ElementType::Float2,
-            0, // byte offset
-            8, // byte stride (2 floats * 4 bytes)
+fn load_gltf_bytes() -> Vec<u8> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let gltf_path = manifest_dir.join(GLTF_PATH);
+    std::fs::read(&gltf_path).unwrap_or_else(|err| {
+        panic!(
+            "Failed to read glTF asset at {}: {}",
+            gltf_path.display(),
+            err
         )
-        .attribute(
-            VertexAttribute::Color,
-            1, // buffer index
-            ElementType::UByte4,
-            0, // byte offset
-            4, // byte stride (4 bytes)
-        )
-        .normalized(VertexAttribute::Color, true)
-        .build()
-        .expect("Failed to create vertex buffer");
+    })
+}
 
-    // Upload vertex data
-    vertex_buffer.set_buffer_at(0, &triangle_positions, 0);
-    vertex_buffer.set_buffer_at(1, &triangle_colors, 0);
+fn forward_to_yaw_pitch(forward: [f32; 3]) -> (f32, f32) {
+    let len = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2])
+        .sqrt()
+        .max(1e-6);
+    let nx = forward[0] / len;
+    let ny = forward[1] / len;
+    let nz = forward[2] / len;
+    let yaw = nz.atan2(nx);
+    let pitch = ny.asin();
+    (yaw, pitch)
+}
 
-    // Create index buffer
-    let mut index_buffer = engine
-        .index_buffer_builder()
-        .index_count(3)
-        .buffer_type(IndexType::UShort)
-        .build()
-        .expect("Failed to create index buffer");
+fn camera_basis(yaw: f32, pitch: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let cos_pitch = pitch.cos();
+    let forward = [
+        yaw.cos() * cos_pitch,
+        pitch.sin(),
+        yaw.sin() * cos_pitch,
+    ];
+    let world_up = [0.0, 1.0, 0.0];
+    let right = normalize(cross(forward, world_up));
+    let up = cross(right, forward);
+    (forward, right, up)
+}
 
-    // Upload index data
-    let indices: [u16; 3] = [0, 1, 2];
-    index_buffer.set_buffer(&indices, 0);
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
 
-    // Create material from embedded bytes
-    let mut material = engine
-        .create_material(MATERIAL_BYTES)
-        .expect("Failed to create material");
-    let mut material_instance = material
-        .default_instance()
-        .expect("Failed to get material instance");
-
-    // Create renderable entity
-    let triangle_entity = entity_manager.create();
-
-    engine
-        .renderable_builder(1)
-        .bounding_box([0.0, 0.0, 0.0], [2.0, 2.0, 1.0])
-        .material(0, &mut material_instance)
-        .geometry(0, PrimitiveType::Triangles, &mut vertex_buffer, &mut index_buffer)
-        .culling(false)
-        .build(triangle_entity);
-
-    triangle_entity
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 1e-6 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
 }
 
 fn main() {
@@ -342,7 +598,7 @@ fn main() {
 
     // Create event loop and run
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("Event loop error");

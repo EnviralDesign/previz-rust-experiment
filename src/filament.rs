@@ -5,7 +5,7 @@
 //! the unsafe FFI calls and resource management.
 
 use crate::ffi;
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CString};
 use std::ptr::NonNull;
 
 /// Backend rendering API
@@ -176,6 +176,30 @@ impl Engine {
             EntityManager { 
                 ptr: NonNull::new(ptr as *mut c_void).expect("EntityManager is null"),
             }
+        }
+    }
+
+    /// Create a directional light and return its entity
+    pub fn create_directional_light(
+        &mut self,
+        entity_manager: &mut EntityManager,
+        color: [f32; 3],
+        intensity: f32,
+        direction: [f32; 3],
+    ) -> Entity {
+        unsafe {
+            let id = ffi::filament_light_create_directional(
+                self.ptr.as_ptr() as *mut _,
+                entity_manager.ptr.as_ptr() as *mut _,
+                color[0],
+                color[1],
+                color[2],
+                intensity,
+                direction[0],
+                direction[1],
+                direction[2],
+            );
+            Entity { id }
         }
     }
 
@@ -548,6 +572,202 @@ impl MaterialInstance {
 
 // Note: MaterialInstance drop is complex because default instances aren't owned
 // For now we'll leak owned instances (proper cleanup requires engine reference)
+
+/// gltfio material provider (jit shader provider)
+pub struct GltfMaterialProvider {
+    ptr: NonNull<c_void>,
+}
+
+impl GltfMaterialProvider {
+    pub fn create_jit(engine: &mut Engine, optimize: bool) -> Option<Self> {
+        unsafe {
+            let ptr = ffi::filament_gltfio_create_jit_shader_provider(
+                engine.ptr.as_ptr() as *mut _,
+                optimize,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| GltfMaterialProvider { ptr })
+        }
+    }
+}
+
+impl Drop for GltfMaterialProvider {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_gltfio_material_provider_destroy_materials(self.ptr.as_ptr() as *mut _);
+            ffi::filament_gltfio_destroy_material_provider(self.ptr.as_ptr() as *mut _);
+        }
+    }
+}
+
+/// gltfio texture provider (stb image)
+pub struct GltfTextureProvider {
+    ptr: NonNull<c_void>,
+}
+
+impl GltfTextureProvider {
+    pub fn create_stb(engine: &mut Engine) -> Option<Self> {
+        unsafe {
+            let ptr = ffi::filament_gltfio_create_stb_texture_provider(
+                engine.ptr.as_ptr() as *mut _,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| GltfTextureProvider { ptr })
+        }
+    }
+}
+
+impl Drop for GltfTextureProvider {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_gltfio_destroy_texture_provider(self.ptr.as_ptr() as *mut _);
+        }
+    }
+}
+
+/// gltfio asset loader
+pub struct GltfAssetLoader {
+    ptr: NonNull<c_void>,
+}
+
+impl GltfAssetLoader {
+    pub fn create(
+        engine: &mut Engine,
+        material_provider: &mut GltfMaterialProvider,
+        entity_manager: &mut EntityManager,
+    ) -> Option<Self> {
+        unsafe {
+            let ptr = ffi::filament_gltfio_asset_loader_create(
+                engine.ptr.as_ptr() as *mut _,
+                material_provider.ptr.as_ptr() as *mut _,
+                entity_manager.ptr.as_ptr() as *mut _,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| GltfAssetLoader { ptr })
+        }
+    }
+
+    pub fn create_asset_from_json(&mut self, bytes: &[u8]) -> Option<GltfAsset> {
+        unsafe {
+            let ptr = ffi::filament_gltfio_asset_loader_create_asset_from_json(
+                self.ptr.as_ptr() as *mut _,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| GltfAsset {
+                ptr,
+                loader: self.ptr,
+            })
+        }
+    }
+}
+
+impl Drop for GltfAssetLoader {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_gltfio_asset_loader_destroy(self.ptr.as_ptr() as *mut _);
+        }
+    }
+}
+
+/// gltfio resource loader
+pub struct GltfResourceLoader {
+    ptr: NonNull<c_void>,
+}
+
+impl GltfResourceLoader {
+    pub fn create(
+        engine: &mut Engine,
+        gltf_path: Option<&str>,
+        normalize_skinning_weights: bool,
+    ) -> Option<Self> {
+        let c_path = gltf_path.map(|path| CString::new(path).expect("Invalid gltf path"));
+        let path_ptr = c_path
+            .as_ref()
+            .map(|path| path.as_ptr())
+            .unwrap_or(std::ptr::null());
+        unsafe {
+            let ptr = ffi::filament_gltfio_resource_loader_create(
+                engine.ptr.as_ptr() as *mut _,
+                path_ptr,
+                normalize_skinning_weights,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| GltfResourceLoader { ptr })
+        }
+    }
+
+    pub fn add_texture_provider(&mut self, mime_type: &str, provider: &mut GltfTextureProvider) {
+        let c_mime = CString::new(mime_type).expect("Invalid mime type");
+        unsafe {
+            ffi::filament_gltfio_resource_loader_add_texture_provider(
+                self.ptr.as_ptr() as *mut _,
+                c_mime.as_ptr() as *const c_char,
+                provider.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+
+    pub fn load_resources(&mut self, asset: &mut GltfAsset) -> bool {
+        unsafe {
+            ffi::filament_gltfio_resource_loader_load_resources(
+                self.ptr.as_ptr() as *mut _,
+                asset.ptr.as_ptr() as *mut _,
+            )
+        }
+    }
+}
+
+impl Drop for GltfResourceLoader {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_gltfio_resource_loader_destroy(self.ptr.as_ptr() as *mut _);
+        }
+    }
+}
+
+/// gltfio asset
+pub struct GltfAsset {
+    ptr: NonNull<c_void>,
+    loader: NonNull<c_void>,
+}
+
+impl GltfAsset {
+    pub fn add_entities_to_scene(&mut self, scene: &mut Scene) {
+        unsafe {
+            ffi::filament_gltfio_asset_add_entities_to_scene(
+                self.ptr.as_ptr() as *mut _,
+                scene.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+
+    pub fn release_source_data(&mut self) {
+        unsafe {
+            ffi::filament_gltfio_asset_release_source_data(self.ptr.as_ptr() as *mut _);
+        }
+    }
+
+    pub fn bounding_box(&mut self) -> ([f32; 3], [f32; 3]) {
+        let mut center = [0.0f32; 3];
+        let mut extent = [0.0f32; 3];
+        unsafe {
+            ffi::filament_gltfio_asset_get_bounding_box(
+                self.ptr.as_ptr() as *mut _,
+                center.as_mut_ptr(),
+                extent.as_mut_ptr(),
+            );
+        }
+        (center, extent)
+    }
+}
+
+impl Drop for GltfAsset {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_gltfio_asset_loader_destroy_asset(
+                self.loader.as_ptr() as *mut _,
+                self.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+}
 
 /// Vertex buffer builder
 pub struct VertexBufferBuilder {

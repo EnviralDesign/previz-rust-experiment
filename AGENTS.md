@@ -1,0 +1,1 @@
+always run cargo check as a test, and fix errors.
