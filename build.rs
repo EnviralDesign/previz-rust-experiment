@@ -120,6 +120,7 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <math/mat4.h>
 #include <filagui/ImGuiHelper.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <filament/VertexBuffer.h>
 #include <filament/IndexBuffer.h>
 #include <filament/RenderableManager.h>
@@ -1202,6 +1203,65 @@ void filagui_imgui_helper_render_scene_ui(
         return;
     }
     helper->render(delta_seconds, [=](filament::Engine*, filament::View*) {
+        ImGuiIO& io = ImGui::GetIO();
+        bool use_docking = false;
+
+#ifdef IMGUI_HAS_DOCK
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        use_docking = (io.ConfigFlags & ImGuiConfigFlags_DockingEnable) != 0;
+
+        ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_PassthruCentralNode;
+        ImGuiWindowFlags host_flags =
+            ImGuiWindowFlags_NoDocking |
+            ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoNavFocus;
+
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        ImGui::SetNextWindowViewport(viewport->ID);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::Begin("DockSpace", nullptr, host_flags);
+        ImGui::PopStyleVar(2);
+
+        ImGuiID dockspace_id = ImGui::GetID("MainDockspace");
+        ImGui::DockSpace(dockspace_id, ImVec2(0, 0), dockspace_flags);
+
+        static bool dock_built = false;
+        if (!dock_built && use_docking) {
+            dock_built = true;
+            ImGui::DockBuilderRemoveNode(dockspace_id);
+            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+            ImGuiID dock_left = 0;
+            ImGuiID dock_right = 0;
+            ImGuiID dock_right_bottom = 0;
+            ImGuiID dock_bottom = 0;
+            ImGuiID dock_main = dockspace_id;
+
+            dock_left = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Left, 0.22f, nullptr, &dock_main);
+            dock_right = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Right, 0.32f, nullptr, &dock_main);
+            dock_right_bottom = ImGui::DockBuilderSplitNode(dock_right, ImGuiDir_Down, 0.45f, nullptr, &dock_right);
+            dock_bottom = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, 0.30f, nullptr, &dock_main);
+
+            ImGui::DockBuilderDockWindow("Hierarchy", dock_left);
+            ImGui::DockBuilderDockWindow("Assets", dock_main);
+            ImGui::DockBuilderDockWindow("Transform", dock_right);
+            ImGui::DockBuilderDockWindow("Materials", dock_right);
+            ImGui::DockBuilderDockWindow("Environment", dock_right_bottom);
+            ImGui::DockBuilderDockWindow("Lighting", dock_bottom);
+            ImGui::DockBuilderFinish(dockspace_id);
+        }
+
+        ImGui::End();
+#endif
+
         ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
         ImGui::Begin(assets_title ? assets_title : "Assets");
         if (assets_body) {
@@ -1209,8 +1269,10 @@ void filagui_imgui_helper_render_scene_ui(
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(12, 220), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(360, 260), ImGuiCond_FirstUseEver);
+        if (!use_docking) {
+            ImGui::SetNextWindowPos(ImVec2(12, 220), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(360, 260), ImGuiCond_FirstUseEver);
+        }
         ImGui::Begin("Hierarchy");
         if (!object_names || object_count <= 0) {
             ImGui::TextUnformatted("No objects loaded.");
@@ -1232,8 +1294,10 @@ void filagui_imgui_helper_render_scene_ui(
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(390, 220), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
+        if (!use_docking) {
+            ImGui::SetNextWindowPos(ImVec2(390, 220), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
+        }
         ImGui::Begin("Transform");
         bool has_selection = selected_index && *selected_index >= 0;
         bool allow_transform = has_selection && (!can_edit_transform || *can_edit_transform);
@@ -1254,8 +1318,10 @@ void filagui_imgui_helper_render_scene_ui(
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(830, 220), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
+        if (!use_docking) {
+            ImGui::SetNextWindowPos(ImVec2(830, 220), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
+        }
         ImGui::Begin("Environment");
         if (hdr_path && hdr_path_capacity > 0) {
             ImGui::InputText("Equirect HDR", hdr_path, (size_t)hdr_path_capacity);
@@ -1284,8 +1350,10 @@ void filagui_imgui_helper_render_scene_ui(
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(12, 500), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
+        if (!use_docking) {
+            ImGui::SetNextWindowPos(ImVec2(12, 500), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
+        }
         ImGui::Begin("Lighting");
         if (light_color_rgb) {
             ImGui::ColorEdit3("Color", light_color_rgb);
@@ -1310,8 +1378,10 @@ void filagui_imgui_helper_render_scene_ui(
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(390, 500), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
+        if (!use_docking) {
+            ImGui::SetNextWindowPos(ImVec2(390, 500), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
+        }
         ImGui::Begin("Materials");
         if (!material_names || material_count <= 0) {
             ImGui::TextUnformatted("No materials loaded.");
