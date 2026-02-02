@@ -769,6 +769,70 @@ impl Drop for GltfAsset {
     }
 }
 
+/// filagui ImGui helper
+pub struct ImGuiHelper {
+    ptr: NonNull<c_void>,
+}
+
+impl ImGuiHelper {
+    pub fn create(engine: &mut Engine, view: &mut View, font_path: Option<&str>) -> Option<Self> {
+        let c_path = font_path.map(|path| CString::new(path).expect("Invalid font path"));
+        let path_ptr = c_path
+            .as_ref()
+            .map(|path| path.as_ptr())
+            .unwrap_or(std::ptr::null());
+        unsafe {
+            let ptr = ffi::filagui_imgui_helper_create(
+                engine.ptr.as_ptr() as *mut _,
+                view.ptr.as_ptr() as *mut _,
+                path_ptr,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| ImGuiHelper { ptr })
+        }
+    }
+
+    pub fn set_display_size(
+        &mut self,
+        width: i32,
+        height: i32,
+        scale_x: f32,
+        scale_y: f32,
+        flip_vertical: bool,
+    ) {
+        unsafe {
+            ffi::filagui_imgui_helper_set_display_size(
+                self.ptr.as_ptr() as *mut _,
+                width,
+                height,
+                scale_x,
+                scale_y,
+                flip_vertical,
+            );
+        }
+    }
+
+    pub fn render_text(&mut self, delta_seconds: f32, title: &str, body: &str) {
+        let c_title = CString::new(title).expect("Invalid title");
+        let c_body = CString::new(body).expect("Invalid body");
+        unsafe {
+            ffi::filagui_imgui_helper_render_text(
+                self.ptr.as_ptr() as *mut _,
+                delta_seconds,
+                c_title.as_ptr(),
+                c_body.as_ptr(),
+            );
+        }
+    }
+}
+
+impl Drop for ImGuiHelper {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filagui_imgui_helper_destroy(self.ptr.as_ptr() as *mut _);
+        }
+    }
+}
+
 /// Vertex buffer builder
 pub struct VertexBufferBuilder {
     ptr: *mut c_void,

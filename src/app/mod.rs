@@ -60,6 +60,7 @@ impl App {
         self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
         render.set_projection_for_window(window);
         self.camera.apply(render.camera_mut());
+        render.init_ui(window);
 
         self.render = Some(render);
     }
@@ -106,14 +107,15 @@ impl App {
 
     fn render(&mut self) {
         let frame_start = Instant::now();
+        self.ui.update(&self.scene, &self.assets);
+        let ui_text = self.ui.summary();
         if let Some(render) = &mut self.render {
-            let render_ms = render.render();
+            let render_ms = render.render(ui_text, self.timing.frame_dt);
             self.timing.set_render_ms(render_ms);
         }
         self.timing
             .update(self.window.as_ref().map(|w| w.as_ref()), frame_start);
         self.update_camera();
-        self.ui.update(&self.scene);
     }
 }
 

@@ -62,6 +62,14 @@ fn extract_tgz(archive_path: &Path, dest_dir: &Path) -> Result<(), Box<dyn std::
 /// not to a subdirectory. So include/ and lib/ will be at OUT_DIR/include, etc.
 fn get_filament_dir() -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let filament_src_dir = manifest_dir.join("third_party").join("filament");
+    if !filament_src_dir.exists() {
+        panic!(
+            "Filament source repo not found at {:?}. Clone it into third_party/filament.",
+            filament_src_dir
+        );
+    }
     let archive_path = out_dir.join(format!("filament-v{}-windows.tgz", FILAMENT_VERSION));
     
     // Check if already extracted (files extract directly to out_dir)
@@ -105,6 +113,8 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <filament/MaterialInstance.h>
 #include <filament/LightManager.h>
 #include <filament/Box.h>
+#include <filagui/ImGuiHelper.h>
+#include <imgui.h>
 #include <filament/VertexBuffer.h>
 #include <filament/IndexBuffer.h>
 #include <filament/RenderableManager.h>
@@ -625,6 +635,54 @@ void filament_gltfio_asset_get_bounding_box(
     extent_xyz[2] = e.z;
 }
 
+// ============================================================================
+// filagui
+// ============================================================================
+
+filagui::ImGuiHelper* filagui_imgui_helper_create(
+    Engine* engine,
+    View* view,
+    const char* font_path
+) {
+    utils::Path fontPath(font_path ? font_path : "");
+    return new filagui::ImGuiHelper(engine, view, fontPath);
+}
+
+void filagui_imgui_helper_destroy(filagui::ImGuiHelper* helper) {
+    delete helper;
+}
+
+void filagui_imgui_helper_set_display_size(
+    filagui::ImGuiHelper* helper,
+    int width,
+    int height,
+    float scale_x,
+    float scale_y,
+    bool flip_vertical
+) {
+    if (helper) {
+        helper->setDisplaySize(width, height, scale_x, scale_y, flip_vertical);
+    }
+}
+
+void filagui_imgui_helper_render_text(
+    filagui::ImGuiHelper* helper,
+    float delta_seconds,
+    const char* title,
+    const char* body
+) {
+    if (!helper) {
+        return;
+    }
+    helper->render(delta_seconds, [title, body](filament::Engine*, filament::View*) {
+        ImGui::Begin(title ? title : "Overlay");
+        if (body) {
+            ImGui::TextUnformatted(body);
+        }
+        ImGui::End();
+    });
+}
+
 } // extern "C"
 "#;
 
@@ -668,6 +726,67 @@ fn compile_material(filament_dir: &Path, out_dir: &Path) -> PathBuf {
     material_out
 }
 
+/// Compile filagui materials and generate resources header/source.
+fn compile_filagui_resources(
+    filament_dir: &Path,
+    filament_src_dir: &Path,
+    out_dir: &Path,
+) -> (PathBuf, PathBuf) {
+    let filagui_dir = filament_src_dir.join("libs").join("filagui");
+    let material_src = filagui_dir.join("src").join("materials").join("uiBlit.mat");
+    let matc_path = filament_dir.join("bin").join("matc.exe");
+    let resgen_path = filament_dir.join("bin").join("resgen.exe");
+
+    if !material_src.exists() {
+        panic!("filagui material source not found at {:?}", material_src);
+    }
+    if !matc_path.exists() {
+        panic!("matc tool not found at {:?}", matc_path);
+    }
+    if !resgen_path.exists() {
+        panic!("resgen tool not found at {:?}", resgen_path);
+    }
+
+    let generation_root = out_dir.join("filagui_generated");
+    let material_dir = generation_root.join("generated").join("material");
+    let resource_dir = generation_root.join("generated").join("resources");
+    fs::create_dir_all(&material_dir).expect("Failed to create filagui material dir");
+    fs::create_dir_all(&resource_dir).expect("Failed to create filagui resource dir");
+
+    let material_out = material_dir.join("uiBlit.filamat");
+    println!(
+        "cargo:warning=Compiling filagui material {} -> {}",
+        material_src.display(),
+        material_out.display()
+    );
+    let status = Command::new(&matc_path)
+        .args(["-a", "opengl", "-p", "desktop", "-o"])
+        .arg(&material_out)
+        .arg(&material_src)
+        .status()
+        .expect("Failed to run matc for filagui");
+    if !status.success() {
+        panic!("matc failed for filagui with status {:?}", status.code());
+    }
+
+    println!(
+        "cargo:warning=Generating filagui resources in {}",
+        resource_dir.display()
+    );
+    let status = Command::new(&resgen_path)
+        .args(["-p", "filagui_resources", "-x"])
+        .arg(&resource_dir)
+        .arg("-c")
+        .arg(&material_out)
+        .status()
+        .expect("Failed to run resgen for filagui");
+    if !status.success() {
+        panic!("resgen failed for filagui with status {:?}", status.code());
+    }
+
+    (generation_root, resource_dir)
+}
+
 /// Generate Rust FFI bindings manually
 /// This is more reliable than bindgen for our use case since Filament's headers
 /// contain complex C++ templates that bindgen struggles with
@@ -697,6 +816,7 @@ pub type AssetLoader = c_void;
 pub type ResourceLoader = c_void;
 pub type TextureProvider = c_void;
 pub type FilamentAsset = c_void;
+pub type ImGuiHelper = c_void;
 
 // Builder wrapper types (opaque)
 pub type MaterialBuilderWrapper = c_void;
@@ -1017,6 +1137,31 @@ extern "C" {
         center_xyz: *mut f32,
         extent_xyz: *mut f32,
     );
+
+    // ========================================================================
+    // filagui
+    // ========================================================================
+
+    pub fn filagui_imgui_helper_create(
+        engine: *mut Engine,
+        view: *mut View,
+        font_path: *const c_char,
+    ) -> *mut ImGuiHelper;
+    pub fn filagui_imgui_helper_destroy(helper: *mut ImGuiHelper);
+    pub fn filagui_imgui_helper_set_display_size(
+        helper: *mut ImGuiHelper,
+        width: i32,
+        height: i32,
+        scale_x: f32,
+        scale_y: f32,
+        flip_vertical: bool,
+    );
+    pub fn filagui_imgui_helper_render_text(
+        helper: *mut ImGuiHelper,
+        delta_seconds: f32,
+        title: *const c_char,
+        body: *const c_char,
+    );
 }
 "#.to_string()
 }
@@ -1025,8 +1170,16 @@ fn main() {
     // Only build on Windows for now
     #[cfg(not(target_os = "windows"))]
     compile_error!("This build script currently only supports Windows");
-    
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let filament_src_dir = manifest_dir.join("third_party").join("filament");
+    if !filament_src_dir.exists() {
+        panic!(
+            "Filament source repo not found at {:?}. Clone it into third_party/filament.",
+            filament_src_dir
+        );
+    }
     
     // Step 1: Get Filament (download if needed)
     let filament_dir = get_filament_dir();
@@ -1050,10 +1203,14 @@ fn main() {
     
     // Step 3: Compile C++ bindings wrapper
     println!("cargo:warning=Compiling C++ bindings...");
+    let filagui_include_dir = filament_src_dir.join("libs").join("filagui").join("include");
+    let imgui_dir = filament_src_dir.join("third_party").join("imgui");
     cc::Build::new()
         .cpp(true)
         .file(&bindings_cpp)
         .include(&include_dir)
+        .include(&filagui_include_dir)
+        .include(&imgui_dir)
         .flag("/std:c++20") // Filament uses designated initializers which require C++20
         .flag("/EHsc")     // Exception handling
         .flag("/MD")       // Dynamic CRT - must match Filament's "md" libraries
@@ -1075,6 +1232,32 @@ fn main() {
         "cargo:warning=Material compiled at {}",
         material_out.display()
     );
+
+    // Step 4.6: Build filagui resources and static lib
+    let (filagui_generation_root, filagui_resource_dir) =
+        compile_filagui_resources(&filament_dir, &filament_src_dir, &out_dir);
+    let filagui_resources_c = filagui_resource_dir.join("filagui_resources.c");
+    let filagui_src_dir = filament_src_dir.join("libs").join("filagui").join("src");
+    let imgui_cpp_dir = imgui_dir.clone();
+    println!("cargo:warning=Compiling filagui...");
+    cc::Build::new()
+        .cpp(true)
+        .file(filagui_src_dir.join("ImGuiHelper.cpp"))
+        .file(filagui_src_dir.join("ImGuiExtensions.cpp"))
+        .file(imgui_cpp_dir.join("imgui.cpp"))
+        .file(imgui_cpp_dir.join("imgui_draw.cpp"))
+        .file(imgui_cpp_dir.join("imgui_tables.cpp"))
+        .file(imgui_cpp_dir.join("imgui_widgets.cpp"))
+        .file(filagui_resources_c)
+        .include(&include_dir)
+        .include(&filagui_include_dir)
+        .include(&imgui_dir)
+        .include(&filagui_generation_root)
+        .flag("/std:c++20")
+        .flag("/EHsc")
+        .flag("/MD")
+        .warnings(false)
+        .compile("filagui_bindings");
     
     // Step 5: Link Filament libraries
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -1111,6 +1294,7 @@ fn main() {
     for lib in &filament_libs {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
+    println!("cargo:rustc-link-lib=static=filagui_bindings");
     
     // System libraries required on Windows
     println!("cargo:rustc-link-lib=gdi32");
@@ -1124,17 +1308,74 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!(
         "cargo:rerun-if-changed={}",
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        manifest_dir.join("assets").join("bakedColor.mat").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir
             .join("assets")
-            .join("bakedColor.mat")
+            .join("gltf")
+            .join("DamagedHelmet.gltf")
             .display()
     );
     println!(
         "cargo:rerun-if-changed={}",
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("assets")
-            .join("gltf")
-            .join("DamagedHelmet.gltf")
+        filament_src_dir
+            .join("libs")
+            .join("filagui")
+            .join("src")
+            .join("ImGuiHelper.cpp")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        filament_src_dir
+            .join("libs")
+            .join("filagui")
+            .join("src")
+            .join("ImGuiExtensions.cpp")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        filament_src_dir
+            .join("libs")
+            .join("filagui")
+            .join("src")
+            .join("materials")
+            .join("uiBlit.mat")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        filament_src_dir
+            .join("third_party")
+            .join("imgui")
+            .join("imgui.cpp")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        filament_src_dir
+            .join("third_party")
+            .join("imgui")
+            .join("imgui_draw.cpp")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        filament_src_dir
+            .join("third_party")
+            .join("imgui")
+            .join("imgui_tables.cpp")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        filament_src_dir
+            .join("third_party")
+            .join("imgui")
+            .join("imgui_widgets.cpp")
             .display()
     );
 }

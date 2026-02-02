@@ -2,7 +2,7 @@ mod camera;
 
 pub use camera::{CameraController, CameraMovement};
 
-use crate::filament::{Backend, Camera, Engine, Entity, EntityManager, Renderer, Scene, SwapChain, View};
+use crate::filament::{Backend, Camera, Engine, ImGuiHelper, Renderer, Scene, SwapChain, View};
 use std::ffi::c_void;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -15,9 +15,10 @@ pub struct RenderContext {
     swap_chain: SwapChain,
     renderer: Renderer,
     view: View,
+    ui_view: Option<View>,
+    ui_helper: Option<ImGuiHelper>,
     scene: Scene,
     camera: Camera,
-    directional_light: Entity,
 }
 
 impl RenderContext {
@@ -58,9 +59,10 @@ impl RenderContext {
             swap_chain,
             renderer,
             view,
+            ui_view: None,
+            ui_helper: None,
             scene,
             camera,
-            directional_light: light_entity,
         }
     }
 
@@ -77,6 +79,12 @@ impl RenderContext {
         let aspect = new_size.width as f64 / new_size.height as f64;
         self.camera
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
+        if let Some(ui_view) = &mut self.ui_view {
+            ui_view.set_viewport(0, 0, new_size.width, new_size.height);
+        }
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.set_display_size(new_size.width as i32, new_size.height as i32, 1.0, 1.0, false);
+        }
     }
 
     pub fn set_projection_for_window(&mut self, window: &Window) {
@@ -86,10 +94,33 @@ impl RenderContext {
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
     }
 
-    pub fn render(&mut self) -> f32 {
+    pub fn init_ui(&mut self, window: &Window) {
+        let mut ui_view = self.engine.create_view().expect("Failed to create UI view");
+        ui_view.set_viewport(0, 0, window.inner_size().width, window.inner_size().height);
+        let mut helper =
+            ImGuiHelper::create(&mut self.engine, &mut ui_view, None)
+                .expect("Failed to create ImGui helper");
+        helper.set_display_size(
+            window.inner_size().width as i32,
+            window.inner_size().height as i32,
+            1.0,
+            1.0,
+            false,
+        );
+        self.ui_view = Some(ui_view);
+        self.ui_helper = Some(helper);
+    }
+
+    pub fn render(&mut self, ui_text: &str, delta_seconds: f32) -> f32 {
         let frame_start = std::time::Instant::now();
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.render_text(delta_seconds, "Assets", ui_text);
+        }
         if self.renderer.begin_frame(&mut self.swap_chain) {
             self.renderer.render(&self.view);
+            if let Some(ui_view) = &self.ui_view {
+                self.renderer.render(ui_view);
+            }
             self.renderer.end_frame();
         }
         let render_end = std::time::Instant::now();
