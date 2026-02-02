@@ -179,6 +179,16 @@ impl Engine {
         }
     }
 
+    /// Get the transform manager
+    pub fn transform_manager(&mut self) -> TransformManager {
+        unsafe {
+            let ptr = ffi::filament_engine_get_transform_manager(self.ptr.as_ptr() as *mut _);
+            TransformManager {
+                ptr: NonNull::new(ptr as *mut c_void).expect("TransformManager is null"),
+            }
+        }
+    }
+
     /// Create a directional light and return its entity
     pub fn create_directional_light(
         &mut self,
@@ -200,6 +210,29 @@ impl Engine {
                 direction[2],
             );
             Entity { id }
+        }
+    }
+
+    /// Update a directional light's parameters
+    pub fn set_directional_light(
+        &mut self,
+        entity: Entity,
+        color: [f32; 3],
+        intensity: f32,
+        direction: [f32; 3],
+    ) {
+        unsafe {
+            ffi::filament_light_set_directional(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+                color[0],
+                color[1],
+                color[2],
+                intensity,
+                direction[0],
+                direction[1],
+                direction[2],
+            );
         }
     }
 
@@ -529,6 +562,23 @@ impl EntityManager {
     }
 }
 
+/// Transform manager
+pub struct TransformManager {
+    ptr: NonNull<c_void>,
+}
+
+impl TransformManager {
+    pub fn set_transform(&mut self, entity: Entity, matrix4x4: &[f32; 16]) {
+        unsafe {
+            ffi::filament_transform_manager_set_transform(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+                matrix4x4.as_ptr(),
+            );
+        }
+    }
+}
+
 /// Material
 pub struct Material {
     ptr: NonNull<c_void>,
@@ -756,6 +806,13 @@ impl GltfAsset {
         }
         (center, extent)
     }
+
+    pub fn root_entity(&mut self) -> Entity {
+        unsafe {
+            let id = ffi::filament_gltfio_asset_get_root(self.ptr.as_ptr() as *mut _);
+            Entity { id }
+        }
+    }
 }
 
 impl Drop for GltfAsset {
@@ -839,6 +896,46 @@ impl ImGuiHelper {
                 delta_seconds,
                 c_title.as_ptr(),
                 c_body.as_ptr(),
+            );
+        }
+    }
+
+    pub fn render_scene_ui(
+        &mut self,
+        delta_seconds: f32,
+        assets_title: &str,
+        assets_body: &str,
+        object_names: &[*const c_char],
+        selected_index: &mut i32,
+        position_xyz: &mut [f32; 3],
+        rotation_deg_xyz: &mut [f32; 3],
+        scale_xyz: &mut [f32; 3],
+        light_color_rgb: &mut [f32; 3],
+        light_intensity: &mut f32,
+        light_dir_xyz: &mut [f32; 3],
+    ) {
+        let c_title = CString::new(assets_title).expect("Invalid title");
+        let c_body = CString::new(assets_body).expect("Invalid body");
+        let names_ptr = if object_names.is_empty() {
+            std::ptr::null()
+        } else {
+            object_names.as_ptr()
+        };
+        unsafe {
+            ffi::filagui_imgui_helper_render_scene_ui(
+                self.ptr.as_ptr() as *mut _,
+                delta_seconds,
+                c_title.as_ptr(),
+                c_body.as_ptr(),
+                names_ptr,
+                object_names.len() as i32,
+                selected_index as *mut i32,
+                position_xyz.as_mut_ptr(),
+                rotation_deg_xyz.as_mut_ptr(),
+                scale_xyz.as_mut_ptr(),
+                light_color_rgb.as_mut_ptr(),
+                light_intensity as *mut f32,
+                light_dir_xyz.as_mut_ptr(),
             );
         }
     }

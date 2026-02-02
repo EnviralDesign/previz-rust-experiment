@@ -112,12 +112,16 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <filament/Material.h>
 #include <filament/MaterialInstance.h>
 #include <filament/LightManager.h>
+#include <filament/TransformManager.h>
 #include <filament/Box.h>
+#include <math/mat4.h>
 #include <filagui/ImGuiHelper.h>
 #include <imgui.h>
 #include <filament/VertexBuffer.h>
 #include <filament/IndexBuffer.h>
 #include <filament/RenderableManager.h>
+#include <cstring>
+#include <cmath>
 #include <filament/TransformManager.h>
 #include <gltfio/AssetLoader.h>
 #include <gltfio/FilamentAsset.h>
@@ -530,6 +534,50 @@ int32_t filament_light_create_directional(
     return Entity::smuggle(entity);
 }
 
+void filament_light_set_directional(
+    Engine* engine,
+    int32_t entity_id,
+    float color_r,
+    float color_g,
+    float color_b,
+    float intensity,
+    float dir_x,
+    float dir_y,
+    float dir_z
+) {
+    Entity entity = Entity::import(entity_id);
+    auto& lm = engine->getLightManager();
+    if (!lm.hasComponent(entity)) {
+        return;
+    }
+    auto instance = lm.getInstance(entity);
+    lm.setColor(instance, {color_r, color_g, color_b});
+    lm.setIntensity(instance, intensity);
+    lm.setDirection(instance, {dir_x, dir_y, dir_z});
+}
+
+// ============================================================================
+// Transforms
+// ============================================================================
+
+void filament_transform_manager_set_transform(
+    TransformManager* tm,
+    int32_t entity_id,
+    const float* matrix4x4
+) {
+    if (!tm || !matrix4x4) {
+        return;
+    }
+    Entity entity = Entity::import(entity_id);
+    if (!tm->hasComponent(entity)) {
+        return;
+    }
+    auto instance = tm->getInstance(entity);
+    filament::math::mat4f matrix;
+    std::memcpy(&matrix, matrix4x4, sizeof(float) * 16);
+    tm->setTransform(instance, matrix);
+}
+
 // ============================================================================
 // gltfio
 // ============================================================================
@@ -633,6 +681,11 @@ void filament_gltfio_asset_get_bounding_box(
     extent_xyz[0] = e.x;
     extent_xyz[1] = e.y;
     extent_xyz[2] = e.z;
+}
+
+int32_t filament_gltfio_asset_get_root(FilamentAsset* asset) {
+    Entity entity = asset->getRoot();
+    return Entity::smuggle(entity);
 }
 
 // ============================================================================
@@ -833,6 +886,7 @@ void filagui_imgui_helper_render_overlay(
     helper->render(delta_seconds, [title, body](filament::Engine*, filament::View*) {
         ImGuiIO& io = ImGui::GetIO();
 
+        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
         ImGui::Begin(title ? title : "Assets");
         if (body) {
             ImGui::TextUnformatted(body);
@@ -841,20 +895,110 @@ void filagui_imgui_helper_render_overlay(
 
         static char name[128] = "";
         static float intensity = 0.5f;
-        ImGui::SetNextWindowSize(ImVec2(520, 320), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(12, 220), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(520, 240), ImGuiCond_FirstUseEver);
         ImGui::Begin("Controls");
         ImGui::InputText("Name", name, sizeof(name));
         ImGui::SliderFloat("Intensity", &intensity, 0.0f, 1.0f);
         ImGui::Text("Editable test field above.");
-        ImGui::Separator();
-        ImGui::Text("io.MousePos: %.1f, %.1f", io.MousePos.x, io.MousePos.y);
-        ImGui::Text("io.MouseDown: L=%d R=%d M=%d",
-                io.MouseDown[0] ? 1 : 0, io.MouseDown[1] ? 1 : 0, io.MouseDown[2] ? 1 : 0);
-        ImGui::Text("io.WantCaptureMouse: %d", io.WantCaptureMouse ? 1 : 0);
-        ImGui::Text("io.WantCaptureKeyboard: %d", io.WantCaptureKeyboard ? 1 : 0);
-        ImGui::Text("io.DisplaySize: %.1f, %.1f", io.DisplaySize.x, io.DisplaySize.y);
-        ImGui::Text("io.DisplayFramebufferScale: %.2f, %.2f",
-                io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
+        ImGui::End();
+    });
+}
+
+void filagui_imgui_helper_render_scene_ui(
+    filagui::ImGuiHelper* helper,
+    float delta_seconds,
+    const char* assets_title,
+    const char* assets_body,
+    const char** object_names,
+    int object_count,
+    int* selected_index,
+    float* position_xyz,
+    float* rotation_deg_xyz,
+    float* scale_xyz,
+    float* light_color_rgb,
+    float* light_intensity,
+    float* light_dir_xyz
+) {
+    if (!helper) {
+        return;
+    }
+    helper->render(delta_seconds, [=](filament::Engine*, filament::View*) {
+        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
+        ImGui::Begin(assets_title ? assets_title : "Assets");
+        if (assets_body) {
+            ImGui::TextUnformatted(assets_body);
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(12, 220), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(360, 260), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Hierarchy");
+        if (!object_names || object_count <= 0) {
+            ImGui::TextUnformatted("No objects loaded.");
+        } else {
+            int current = selected_index ? *selected_index : -1;
+            if (current < 0 || current >= object_count) {
+                current = -1;
+            }
+            for (int i = 0; i < object_count; ++i) {
+                const char* name = object_names[i] ? object_names[i] : "Object";
+                bool selected = (i == current);
+                if (ImGui::Selectable(name, selected)) {
+                    if (selected_index) {
+                        *selected_index = i;
+                    }
+                    current = i;
+                }
+            }
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(390, 220), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Transform");
+        bool has_selection = selected_index && *selected_index >= 0;
+        if (!has_selection) {
+            ImGui::BeginDisabled();
+        }
+        if (position_xyz) {
+            ImGui::InputFloat3("Position", position_xyz, "%.3f");
+        }
+        if (rotation_deg_xyz) {
+            ImGui::InputFloat3("Rotation (deg)", rotation_deg_xyz, "%.2f");
+        }
+        if (scale_xyz) {
+            ImGui::InputFloat3("Scale", scale_xyz, "%.3f");
+        }
+        if (!has_selection) {
+            ImGui::EndDisabled();
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(12, 500), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Lighting");
+        if (light_color_rgb) {
+            ImGui::ColorEdit3("Color", light_color_rgb);
+        }
+        if (light_intensity) {
+            ImGui::SliderFloat("Intensity", light_intensity, 0.0f, 200000.0f, "%.1f");
+        }
+        if (light_dir_xyz) {
+            ImGui::InputFloat3("Direction", light_dir_xyz, "%.3f");
+            ImGui::SameLine();
+            if (ImGui::Button("Normalize")) {
+                float x = light_dir_xyz[0];
+                float y = light_dir_xyz[1];
+                float z = light_dir_xyz[2];
+                float len = std::sqrt(x * x + y * y + z * z);
+                if (len > 1e-6f) {
+                    light_dir_xyz[0] = x / len;
+                    light_dir_xyz[1] = y / len;
+                    light_dir_xyz[2] = z / len;
+                }
+            }
+        }
         ImGui::End();
     });
 }
@@ -1255,6 +1399,26 @@ extern "C" {
         dir_y: f32,
         dir_z: f32,
     ) -> i32;
+    pub fn filament_light_set_directional(
+        engine: *mut Engine,
+        entity_id: i32,
+        color_r: f32,
+        color_g: f32,
+        color_b: f32,
+        intensity: f32,
+        dir_x: f32,
+        dir_y: f32,
+        dir_z: f32,
+    );
+
+    // ========================================================================
+    // Transforms
+    // ========================================================================
+    pub fn filament_transform_manager_set_transform(
+        tm: *mut TransformManager,
+        entity_id: i32,
+        matrix4x4: *const f32,
+    );
 
     // ========================================================================
     // gltfio
@@ -1313,6 +1477,7 @@ extern "C" {
         center_xyz: *mut f32,
         extent_xyz: *mut f32,
     );
+    pub fn filament_gltfio_asset_get_root(asset: *mut FilamentAsset) -> i32;
 
     // ========================================================================
     // filagui
@@ -1373,6 +1538,21 @@ extern "C" {
         delta_seconds: f32,
         title: *const c_char,
         body: *const c_char,
+    );
+    pub fn filagui_imgui_helper_render_scene_ui(
+        helper: *mut ImGuiHelper,
+        delta_seconds: f32,
+        assets_title: *const c_char,
+        assets_body: *const c_char,
+        object_names: *const *const c_char,
+        object_count: i32,
+        selected_index: *mut i32,
+        position_xyz: *mut f32,
+        rotation_deg_xyz: *mut f32,
+        scale_xyz: *mut f32,
+        light_color_rgb: *mut f32,
+        light_intensity: *mut f32,
+        light_dir_xyz: *mut f32,
     );
 }
 "#.to_string()

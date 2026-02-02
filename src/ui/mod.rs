@@ -4,6 +4,15 @@ use crate::scene::SceneState;
 pub struct UiState {
     show_asset_panel: bool,
     asset_summary: String,
+    selected_index: i32,
+    light_settings: LightSettings,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LightSettings {
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub direction: [f32; 3],
 }
 
 impl UiState {
@@ -11,6 +20,12 @@ impl UiState {
         Self {
             show_asset_panel: true,
             asset_summary: String::new(),
+            selected_index: -1,
+            light_settings: LightSettings {
+                color: [1.0, 1.0, 1.0],
+                intensity: 100_000.0,
+                direction: [0.0, -1.0, -0.5],
+            },
         }
     }
 
@@ -38,5 +53,21 @@ impl UiState {
 
     pub fn summary(&self) -> &str {
         &self.asset_summary
+    }
+
+    pub fn selected_index(&self) -> i32 {
+        self.selected_index
+    }
+
+    pub fn set_selected_index(&mut self, index: i32) {
+        self.selected_index = index;
+    }
+
+    pub fn light_settings(&self) -> LightSettings {
+        self.light_settings
+    }
+
+    pub fn set_light_settings(&mut self, settings: LightSettings) {
+        self.light_settings = settings;
     }
 }

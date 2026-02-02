@@ -1,6 +1,6 @@
 use crate::filament::{
-    Engine, EntityManager, GltfAsset, GltfAssetLoader, GltfMaterialProvider, GltfResourceLoader,
-    GltfTextureProvider, Scene,
+    Engine, Entity, EntityManager, GltfAsset, GltfAssetLoader, GltfMaterialProvider,
+    GltfResourceLoader, GltfTextureProvider, Scene,
 };
 use std::path::PathBuf;
 
@@ -11,6 +11,7 @@ pub struct LoadedAsset {
     pub name: String,
     pub center: [f32; 3],
     pub extent: [f32; 3],
+    pub root_entity: Entity,
 }
 
 pub struct AssetManager {
@@ -75,12 +76,18 @@ impl AssetManager {
         asset.add_entities_to_scene(scene);
 
         let (center, extent) = asset.bounding_box();
+        let root_entity = asset.root_entity();
         let name = PathBuf::from(path)
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("gltf")
             .to_string();
-        let loaded_asset = LoadedAsset { name, center, extent };
+        let loaded_asset = LoadedAsset {
+            name,
+            center,
+            extent,
+            root_entity,
+        };
 
         self.gltf_asset = Some(asset);
         self.gltf_asset_loader = Some(asset_loader);

@@ -3,13 +3,14 @@ mod timing;
 
 use crate::assets::{AssetManager, DEFAULT_GLTF_PATH};
 use crate::render::{CameraController, CameraMovement, RenderContext};
-use crate::scene::SceneState;
+use crate::scene::{compose_transform_matrix, SceneState};
 use crate::ui::UiState;
 use input::{InputAction, InputState};
 use timing::FrameTiming;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::ffi::CString;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -117,6 +118,26 @@ impl App {
         let frame_start = Instant::now();
         self.ui.update(&self.scene, &self.assets);
         let ui_text = self.ui.summary();
+        let object_names: Vec<CString> = self
+            .scene
+            .object_names()
+            .into_iter()
+            .map(|name| CString::new(name).unwrap_or_else(|_| CString::new("Object").unwrap()))
+            .collect();
+        let mut selected_index = self.ui.selected_index();
+        let mut position = [0.0f32; 3];
+        let mut rotation = [0.0f32; 3];
+        let mut scale = [1.0f32; 3];
+        let mut has_selection = false;
+        if selected_index >= 0 {
+            if let Some(object) = self.scene.objects().get(selected_index as usize) {
+                position = object.position;
+                rotation = object.rotation_deg;
+                scale = object.scale;
+                has_selection = true;
+            }
+        }
+        let mut light_settings = self.ui.light_settings();
         if let Some(render) = &mut self.render {
             let (mx, my) = if self.window_focused {
                 self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
@@ -127,8 +148,53 @@ impl App {
             for (index, down) in self.mouse_buttons.iter().enumerate() {
                 render.ui_mouse_button(index as i32, *down);
             }
-            let render_ms = render.render(ui_text, self.timing.frame_dt);
+            let render_ms = render.render_scene_ui(
+                "Assets",
+                ui_text,
+                &object_names,
+                &mut selected_index,
+                &mut position,
+                &mut rotation,
+                &mut scale,
+                &mut light_settings.color,
+                &mut light_settings.intensity,
+                &mut light_settings.direction,
+                self.timing.frame_dt,
+            );
             self.timing.set_render_ms(render_ms);
+        }
+        let previous_selection = self.ui.selected_index();
+        self.ui.set_selected_index(selected_index);
+        self.ui.set_light_settings(light_settings);
+
+        if let Some(render) = &mut self.render {
+            render.set_directional_light(
+                light_settings.color,
+                light_settings.intensity,
+                light_settings.direction,
+            );
+            if has_selection && selected_index == previous_selection {
+                if let Some(object) = self.scene.object_mut(selected_index as usize) {
+                    let mut changed = false;
+                    if object.position != position {
+                        object.position = position;
+                        changed = true;
+                    }
+                    if object.rotation_deg != rotation {
+                        object.rotation_deg = rotation;
+                        changed = true;
+                    }
+                    if object.scale != scale {
+                        object.scale = scale;
+                        changed = true;
+                    }
+                    if changed {
+                        let matrix =
+                            compose_transform_matrix(object.position, object.rotation_deg, object.scale);
+                        render.set_entity_transform(object.root_entity, matrix);
+                    }
+                }
+            }
         }
         self.timing
             .update(self.window.as_ref().map(|w| w.as_ref()), frame_start);

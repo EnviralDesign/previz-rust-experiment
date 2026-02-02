@@ -2,7 +2,10 @@ mod camera;
 
 pub use camera::{CameraController, CameraMovement};
 
-use crate::filament::{Backend, Camera, Engine, ImGuiHelper, Renderer, Scene, SwapChain, View};
+use crate::filament::{
+    Backend, Camera, Engine, Entity, ImGuiHelper, Renderer, Scene, SwapChain, View,
+};
+use std::ffi::CString;
 use std::ffi::c_void;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -19,6 +22,7 @@ pub struct RenderContext {
     ui_helper: Option<ImGuiHelper>,
     scene: Scene,
     camera: Camera,
+    light_entity: Option<Entity>,
 }
 
 impl RenderContext {
@@ -63,6 +67,7 @@ impl RenderContext {
             ui_helper: None,
             scene,
             camera,
+            light_entity: Some(light_entity),
         }
     }
 
@@ -163,10 +168,37 @@ impl RenderContext {
             .unwrap_or(false)
     }
 
-    pub fn render(&mut self, ui_text: &str, delta_seconds: f32) -> f32 {
+    pub fn render_scene_ui(
+        &mut self,
+        assets_title: &str,
+        assets_body: &str,
+        object_names: &[CString],
+        selected_index: &mut i32,
+        position_xyz: &mut [f32; 3],
+        rotation_deg_xyz: &mut [f32; 3],
+        scale_xyz: &mut [f32; 3],
+        light_color_rgb: &mut [f32; 3],
+        light_intensity: &mut f32,
+        light_dir_xyz: &mut [f32; 3],
+        delta_seconds: f32,
+    ) -> f32 {
         let frame_start = std::time::Instant::now();
         if let Some(ui_helper) = &mut self.ui_helper {
-            ui_helper.render_overlay(delta_seconds, "Assets", ui_text);
+            let name_ptrs: Vec<*const std::ffi::c_char> =
+                object_names.iter().map(|name| name.as_ptr()).collect();
+            ui_helper.render_scene_ui(
+                delta_seconds,
+                assets_title,
+                assets_body,
+                &name_ptrs,
+                selected_index,
+                position_xyz,
+                rotation_deg_xyz,
+                scale_xyz,
+                light_color_rgb,
+                light_intensity,
+                light_dir_xyz,
+            );
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {
             self.renderer.render(&self.view);
@@ -180,6 +212,23 @@ impl RenderContext {
             .saturating_duration_since(frame_start)
             .as_secs_f32()
             * 1000.0
+    }
+
+    pub fn set_directional_light(
+        &mut self,
+        color: [f32; 3],
+        intensity: f32,
+        direction: [f32; 3],
+    ) {
+        if let Some(entity) = self.light_entity {
+            self.engine
+                .set_directional_light(entity, color, intensity, direction);
+        }
+    }
+
+    pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) {
+        let mut tm = self.engine.transform_manager();
+        tm.set_transform(entity, &matrix4x4);
     }
 }
 
