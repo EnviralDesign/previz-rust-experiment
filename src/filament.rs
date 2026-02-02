@@ -823,6 +823,63 @@ impl ImGuiHelper {
             );
         }
     }
+
+    pub fn render_controls(&mut self, delta_seconds: f32) {
+        unsafe {
+            ffi::filagui_imgui_helper_render_controls(self.ptr.as_ptr() as *mut _, delta_seconds);
+        }
+    }
+
+    pub fn render_overlay(&mut self, delta_seconds: f32, title: &str, body: &str) {
+        let c_title = CString::new(title).expect("Invalid title");
+        let c_body = CString::new(body).expect("Invalid body");
+        unsafe {
+            ffi::filagui_imgui_helper_render_overlay(
+                self.ptr.as_ptr() as *mut _,
+                delta_seconds,
+                c_title.as_ptr(),
+                c_body.as_ptr(),
+            );
+        }
+    }
+
+    pub fn add_mouse_pos(&mut self, x: f32, y: f32) {
+        unsafe {
+            ffi::filagui_imgui_helper_add_mouse_pos(self.ptr.as_ptr() as *mut _, x, y);
+        }
+    }
+
+    pub fn add_mouse_button(&mut self, button: i32, down: bool) {
+        unsafe {
+            ffi::filagui_imgui_helper_add_mouse_button(self.ptr.as_ptr() as *mut _, button, down);
+        }
+    }
+
+    pub fn add_mouse_wheel(&mut self, wheel_x: f32, wheel_y: f32) {
+        unsafe {
+            ffi::filagui_imgui_helper_add_mouse_wheel(self.ptr.as_ptr() as *mut _, wheel_x, wheel_y);
+        }
+    }
+
+    pub fn add_key_event(&mut self, key: i32, down: bool) {
+        unsafe {
+            ffi::filagui_imgui_helper_add_key_event(self.ptr.as_ptr() as *mut _, key, down);
+        }
+    }
+
+    pub fn add_input_character(&mut self, codepoint: u32) {
+        unsafe {
+            ffi::filagui_imgui_helper_add_input_character(self.ptr.as_ptr() as *mut _, codepoint);
+        }
+    }
+
+    pub fn want_capture_mouse(&mut self) -> bool {
+        unsafe { ffi::filagui_imgui_helper_want_capture_mouse(self.ptr.as_ptr() as *mut _) }
+    }
+
+    pub fn want_capture_keyboard(&mut self) -> bool {
+        unsafe { ffi::filagui_imgui_helper_want_capture_keyboard(self.ptr.as_ptr() as *mut _) }
+    }
 }
 
 impl Drop for ImGuiHelper {

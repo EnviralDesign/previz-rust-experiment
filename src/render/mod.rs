@@ -74,7 +74,7 @@ impl RenderContext {
         &mut self.camera
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
         self.view.set_viewport(0, 0, new_size.width, new_size.height);
         let aspect = new_size.width as f64 / new_size.height as f64;
         self.camera
@@ -83,7 +83,13 @@ impl RenderContext {
             ui_view.set_viewport(0, 0, new_size.width, new_size.height);
         }
         if let Some(ui_helper) = &mut self.ui_helper {
-            ui_helper.set_display_size(new_size.width as i32, new_size.height as i32, 1.0, 1.0, false);
+            ui_helper.set_display_size(
+                new_size.width as i32,
+                new_size.height as i32,
+                1.0,
+                1.0,
+                false,
+            );
         }
     }
 
@@ -100,9 +106,10 @@ impl RenderContext {
         let mut helper =
             ImGuiHelper::create(&mut self.engine, &mut ui_view, None)
                 .expect("Failed to create ImGui helper");
+        let size = window.inner_size();
         helper.set_display_size(
-            window.inner_size().width as i32,
-            window.inner_size().height as i32,
+            size.width as i32,
+            size.height as i32,
             1.0,
             1.0,
             false,
@@ -111,10 +118,55 @@ impl RenderContext {
         self.ui_helper = Some(helper);
     }
 
+    pub fn ui_mouse_pos(&mut self, x: f32, y: f32) {
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.add_mouse_pos(x, y);
+        }
+    }
+
+    pub fn ui_mouse_button(&mut self, button: i32, down: bool) {
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.add_mouse_button(button, down);
+        }
+    }
+
+    pub fn ui_mouse_wheel(&mut self, wheel_x: f32, wheel_y: f32) {
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.add_mouse_wheel(wheel_x, wheel_y);
+        }
+    }
+
+    pub fn ui_key_event(&mut self, key: i32, down: bool) {
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.add_key_event(key, down);
+        }
+    }
+
+    pub fn ui_add_input_character(&mut self, codepoint: u32) {
+        if let Some(ui_helper) = &mut self.ui_helper {
+            ui_helper.add_input_character(codepoint);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn ui_want_capture_mouse(&mut self) -> bool {
+        self.ui_helper
+            .as_mut()
+            .map(|helper| helper.want_capture_mouse())
+            .unwrap_or(false)
+    }
+
+    pub fn ui_want_capture_keyboard(&mut self) -> bool {
+        self.ui_helper
+            .as_mut()
+            .map(|helper| helper.want_capture_keyboard())
+            .unwrap_or(false)
+    }
+
     pub fn render(&mut self, ui_text: &str, delta_seconds: f32) -> f32 {
         let frame_start = std::time::Instant::now();
         if let Some(ui_helper) = &mut self.ui_helper {
-            ui_helper.render_text(delta_seconds, "Assets", ui_text);
+            ui_helper.render_overlay(delta_seconds, "Assets", ui_text);
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {
             self.renderer.render(&self.view);

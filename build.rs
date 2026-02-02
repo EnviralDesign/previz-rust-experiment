@@ -665,6 +665,114 @@ void filagui_imgui_helper_set_display_size(
     }
 }
 
+static inline void filagui_imgui_helper_set_context(filagui::ImGuiHelper* helper) {
+    if (!helper) {
+        return;
+    }
+    ImGui::SetCurrentContext(helper->getImGuiContext());
+}
+
+void filagui_imgui_helper_add_mouse_pos(
+    filagui::ImGuiHelper* helper,
+    float x,
+    float y
+) {
+    if (!helper) {
+        return;
+    }
+    filagui_imgui_helper_set_context(helper);
+    ImGuiIO& io = ImGui::GetIO();
+#if IMGUI_VERSION_NUM >= 18700
+    io.AddMousePosEvent(x, y);
+#else
+    io.MousePos = ImVec2(x, y);
+#endif
+}
+
+void filagui_imgui_helper_add_mouse_button(
+    filagui::ImGuiHelper* helper,
+    int button,
+    bool down
+) {
+    if (!helper) {
+        return;
+    }
+    filagui_imgui_helper_set_context(helper);
+    ImGuiIO& io = ImGui::GetIO();
+#if IMGUI_VERSION_NUM >= 18700
+    io.AddMouseButtonEvent(button, down);
+#else
+    if (button >= 0 && button < 5) {
+        io.MouseDown[button] = down;
+    }
+#endif
+}
+
+void filagui_imgui_helper_add_mouse_wheel(
+    filagui::ImGuiHelper* helper,
+    float wheel_x,
+    float wheel_y
+) {
+    if (!helper) {
+        return;
+    }
+    filagui_imgui_helper_set_context(helper);
+    ImGuiIO& io = ImGui::GetIO();
+#if IMGUI_VERSION_NUM >= 18700
+    io.AddMouseWheelEvent(wheel_x, wheel_y);
+#else
+    io.MouseWheelH += wheel_x;
+    io.MouseWheel += wheel_y;
+#endif
+}
+
+void filagui_imgui_helper_add_key_event(
+    filagui::ImGuiHelper* helper,
+    int key,
+    bool down
+) {
+    if (!helper) {
+        return;
+    }
+    filagui_imgui_helper_set_context(helper);
+    ImGuiIO& io = ImGui::GetIO();
+#if IMGUI_VERSION_NUM >= 18700
+    io.AddKeyEvent((ImGuiKey)key, down);
+#else
+    if (key >= 0 && key < IM_ARRAYSIZE(io.KeysDown)) {
+        io.KeysDown[key] = down;
+    }
+#endif
+}
+
+void filagui_imgui_helper_add_input_character(
+    filagui::ImGuiHelper* helper,
+    unsigned int codepoint
+) {
+    if (!helper) {
+        return;
+    }
+    filagui_imgui_helper_set_context(helper);
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddInputCharacter(codepoint);
+}
+
+bool filagui_imgui_helper_want_capture_mouse(filagui::ImGuiHelper* helper) {
+    if (!helper) {
+        return false;
+    }
+    filagui_imgui_helper_set_context(helper);
+    return ImGui::GetIO().WantCaptureMouse;
+}
+
+bool filagui_imgui_helper_want_capture_keyboard(filagui::ImGuiHelper* helper) {
+    if (!helper) {
+        return false;
+    }
+    filagui_imgui_helper_set_context(helper);
+    return ImGui::GetIO().WantCaptureKeyboard;
+}
+
 void filagui_imgui_helper_render_text(
     filagui::ImGuiHelper* helper,
     float delta_seconds,
@@ -679,6 +787,74 @@ void filagui_imgui_helper_render_text(
         if (body) {
             ImGui::TextUnformatted(body);
         }
+        ImGui::End();
+    });
+}
+
+void filagui_imgui_helper_render_controls(
+    filagui::ImGuiHelper* helper,
+    float delta_seconds
+) {
+    if (!helper) {
+        return;
+    }
+    helper->render(delta_seconds, [](filament::Engine*, filament::View*) {
+        static char name[128] = "";
+        static float intensity = 0.5f;
+        ImGuiIO& io = ImGui::GetIO();
+
+        ImGui::SetNextWindowSize(ImVec2(520, 320), ImGuiCond_Always);
+        ImGui::Begin("Controls");
+        ImGui::InputText("Name", name, sizeof(name));
+        ImGui::SliderFloat("Intensity", &intensity, 0.0f, 1.0f);
+        ImGui::Text("Editable test field above.");
+        ImGui::Separator();
+        ImGui::Text("io.MousePos: %.1f, %.1f", io.MousePos.x, io.MousePos.y);
+        ImGui::Text("io.MouseDown: L=%d R=%d M=%d",
+                io.MouseDown[0] ? 1 : 0, io.MouseDown[1] ? 1 : 0, io.MouseDown[2] ? 1 : 0);
+        ImGui::Text("io.WantCaptureMouse: %d", io.WantCaptureMouse ? 1 : 0);
+        ImGui::Text("io.WantCaptureKeyboard: %d", io.WantCaptureKeyboard ? 1 : 0);
+        ImGui::Text("io.DisplaySize: %.1f, %.1f", io.DisplaySize.x, io.DisplaySize.y);
+        ImGui::Text("io.DisplayFramebufferScale: %.2f, %.2f",
+                io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
+        ImGui::End();
+    });
+}
+
+void filagui_imgui_helper_render_overlay(
+    filagui::ImGuiHelper* helper,
+    float delta_seconds,
+    const char* title,
+    const char* body
+) {
+    if (!helper) {
+        return;
+    }
+    helper->render(delta_seconds, [title, body](filament::Engine*, filament::View*) {
+        ImGuiIO& io = ImGui::GetIO();
+
+        ImGui::Begin(title ? title : "Assets");
+        if (body) {
+            ImGui::TextUnformatted(body);
+        }
+        ImGui::End();
+
+        static char name[128] = "";
+        static float intensity = 0.5f;
+        ImGui::SetNextWindowSize(ImVec2(520, 320), ImGuiCond_Always);
+        ImGui::Begin("Controls");
+        ImGui::InputText("Name", name, sizeof(name));
+        ImGui::SliderFloat("Intensity", &intensity, 0.0f, 1.0f);
+        ImGui::Text("Editable test field above.");
+        ImGui::Separator();
+        ImGui::Text("io.MousePos: %.1f, %.1f", io.MousePos.x, io.MousePos.y);
+        ImGui::Text("io.MouseDown: L=%d R=%d M=%d",
+                io.MouseDown[0] ? 1 : 0, io.MouseDown[1] ? 1 : 0, io.MouseDown[2] ? 1 : 0);
+        ImGui::Text("io.WantCaptureMouse: %d", io.WantCaptureMouse ? 1 : 0);
+        ImGui::Text("io.WantCaptureKeyboard: %d", io.WantCaptureKeyboard ? 1 : 0);
+        ImGui::Text("io.DisplaySize: %.1f, %.1f", io.DisplaySize.x, io.DisplaySize.y);
+        ImGui::Text("io.DisplayFramebufferScale: %.2f, %.2f",
+                io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
         ImGui::End();
     });
 }
@@ -1156,7 +1332,43 @@ extern "C" {
         scale_y: f32,
         flip_vertical: bool,
     );
+    pub fn filagui_imgui_helper_add_mouse_pos(
+        helper: *mut ImGuiHelper,
+        x: f32,
+        y: f32,
+    );
+    pub fn filagui_imgui_helper_add_mouse_button(
+        helper: *mut ImGuiHelper,
+        button: i32,
+        down: bool,
+    );
+    pub fn filagui_imgui_helper_add_mouse_wheel(
+        helper: *mut ImGuiHelper,
+        wheel_x: f32,
+        wheel_y: f32,
+    );
+    pub fn filagui_imgui_helper_add_key_event(
+        helper: *mut ImGuiHelper,
+        key: i32,
+        down: bool,
+    );
+    pub fn filagui_imgui_helper_add_input_character(
+        helper: *mut ImGuiHelper,
+        codepoint: u32,
+    );
+    pub fn filagui_imgui_helper_want_capture_mouse(helper: *mut ImGuiHelper) -> bool;
+    pub fn filagui_imgui_helper_want_capture_keyboard(helper: *mut ImGuiHelper) -> bool;
     pub fn filagui_imgui_helper_render_text(
+        helper: *mut ImGuiHelper,
+        delta_seconds: f32,
+        title: *const c_char,
+        body: *const c_char,
+    );
+    pub fn filagui_imgui_helper_render_controls(
+        helper: *mut ImGuiHelper,
+        delta_seconds: f32,
+    );
+    pub fn filagui_imgui_helper_render_overlay(
         helper: *mut ImGuiHelper,
         delta_seconds: f32,
         title: *const c_char,
