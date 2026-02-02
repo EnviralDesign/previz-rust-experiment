@@ -3,14 +3,16 @@ mod timing;
 
 use crate::assets::{AssetManager, DEFAULT_GLTF_PATH};
 use crate::render::{CameraController, CameraMovement, RenderContext};
-use crate::scene::{compose_transform_matrix, SceneState};
-use crate::ui::UiState;
+use crate::scene::{compose_transform_matrix, SceneObjectKind, SceneState};
+use crate::ui::{MaterialParams, UiState};
 use input::{InputAction, InputState};
 use timing::FrameTiming;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::ffi::CString;
+use std::path::PathBuf;
+use std::process::Command;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -65,6 +67,9 @@ impl App {
             self.assets
                 .load_gltf_from_path(engine, scene, &mut entity_manager, DEFAULT_GLTF_PATH);
         self.scene.add_asset(&loaded);
+        if let Some(entity) = render.light_entity() {
+            self.scene.add_directional_light("Directional Light", entity);
+        }
 
         self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
         render.set_projection_for_window(window);
@@ -117,55 +122,93 @@ impl App {
     fn render(&mut self) {
         let frame_start = Instant::now();
         self.ui.update(&self.scene, &self.assets);
-        let ui_text = self.ui.summary();
+        let ui_text = self.ui.summary().to_string();
         let object_names: Vec<CString> = self
             .scene
             .object_names()
             .into_iter()
             .map(|name| CString::new(name).unwrap_or_else(|_| CString::new("Object").unwrap()))
             .collect();
+        let material_names: Vec<CString> = self
+            .assets
+            .material_names()
+            .iter()
+            .map(|name| CString::new(name.as_str()).unwrap_or_else(|_| CString::new("Material").unwrap()))
+            .collect();
         let mut selected_index = self.ui.selected_index();
         let mut position = [0.0f32; 3];
         let mut rotation = [0.0f32; 3];
         let mut scale = [1.0f32; 3];
-        let mut has_selection = false;
+        let mut can_edit_transform = false;
         if selected_index >= 0 {
             if let Some(object) = self.scene.objects().get(selected_index as usize) {
                 position = object.position;
                 rotation = object.rotation_deg;
                 scale = object.scale;
-                has_selection = true;
+                can_edit_transform = object.kind == SceneObjectKind::Asset;
             }
         }
         let mut light_settings = self.ui.light_settings();
-        if let Some(render) = &mut self.render {
-            let (mx, my) = if self.window_focused {
-                self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
-            } else {
-                (-f32::MAX, -f32::MAX)
-            };
-            render.ui_mouse_pos(mx, my);
-            for (index, down) in self.mouse_buttons.iter().enumerate() {
-                render.ui_mouse_button(index as i32, *down);
+        let mut selected_material_index = self.ui.selected_material_index();
+        let mut material_params = self.ui.material_params();
+        let previous_material_selection = selected_material_index;
+        let previous_material_params = material_params;
+        let previous_environment_intensity = self.ui.environment_intensity();
+        let mut environment_intensity = self.ui.environment_intensity();
+        let mut environment_apply = false;
+        let mut environment_generate = false;
+        let (hdr_path_string, ibl_path_string, skybox_path_string) = {
+            let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
+            if let Some(render) = &mut self.render {
+                let (mx, my) = if self.window_focused {
+                    self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
+                } else {
+                    (-f32::MAX, -f32::MAX)
+                };
+                render.ui_mouse_pos(mx, my);
+                for (index, down) in self.mouse_buttons.iter().enumerate() {
+                    render.ui_mouse_button(index as i32, *down);
+                }
+                let render_ms = render.render_scene_ui(
+                    "Assets",
+                    &ui_text,
+                    &object_names,
+                    &mut selected_index,
+                    &mut can_edit_transform,
+                    &mut position,
+                    &mut rotation,
+                    &mut scale,
+                    &mut light_settings.color,
+                    &mut light_settings.intensity,
+                    &mut light_settings.direction,
+                    &material_names,
+                    &mut selected_material_index,
+                    &mut material_params.base_color_rgba,
+                    &mut material_params.metallic,
+                    &mut material_params.roughness,
+                    &mut material_params.emissive_rgb,
+                    hdr_path,
+                    ibl_path,
+                    skybox_path,
+                    &mut environment_intensity,
+                    &mut environment_apply,
+                    &mut environment_generate,
+                    self.timing.frame_dt,
+                );
+                self.timing.set_render_ms(render_ms);
             }
-            let render_ms = render.render_scene_ui(
-                "Assets",
-                ui_text,
-                &object_names,
-                &mut selected_index,
-                &mut position,
-                &mut rotation,
-                &mut scale,
-                &mut light_settings.color,
-                &mut light_settings.intensity,
-                &mut light_settings.direction,
-                self.timing.frame_dt,
-            );
-            self.timing.set_render_ms(render_ms);
-        }
+            (
+                buffer_to_string(hdr_path),
+                buffer_to_string(ibl_path),
+                buffer_to_string(skybox_path),
+            )
+        };
         let previous_selection = self.ui.selected_index();
         self.ui.set_selected_index(selected_index);
         self.ui.set_light_settings(light_settings);
+        self.ui.set_selected_material_index(selected_material_index);
+        self.ui.set_material_params(material_params);
+        self.ui.set_environment_intensity(environment_intensity);
 
         if let Some(render) = &mut self.render {
             render.set_directional_light(
@@ -173,26 +216,90 @@ impl App {
                 light_settings.intensity,
                 light_settings.direction,
             );
-            if has_selection && selected_index == previous_selection {
+            if can_edit_transform && selected_index == previous_selection {
                 if let Some(object) = self.scene.object_mut(selected_index as usize) {
-                    let mut changed = false;
-                    if object.position != position {
-                        object.position = position;
-                        changed = true;
+                    if object.kind == SceneObjectKind::Asset {
+                        let mut changed = false;
+                        if object.position != position {
+                            object.position = position;
+                            changed = true;
+                        }
+                        if object.rotation_deg != rotation {
+                            object.rotation_deg = rotation;
+                            changed = true;
+                        }
+                        if object.scale != scale {
+                            object.scale = scale;
+                            changed = true;
+                        }
+                        if changed {
+                            if let Some(entity) = object.root_entity {
+                                let matrix = compose_transform_matrix(
+                                    object.position,
+                                    object.rotation_deg,
+                                    object.scale,
+                                );
+                                render.set_entity_transform(entity, matrix);
+                            }
+                        }
                     }
-                    if object.rotation_deg != rotation {
-                        object.rotation_deg = rotation;
-                        changed = true;
+                }
+            }
+            if (environment_intensity - previous_environment_intensity).abs() > f32::EPSILON {
+                render.set_environment_intensity(environment_intensity);
+            }
+            if environment_generate {
+                match generate_ktx_from_hdr(&hdr_path_string) {
+                    Ok((ibl_path, skybox_path)) => {
+                        self.ui.set_environment_status(format!(
+                            "Generated KTX:\nIBL: {}\nSkybox: {}",
+                            ibl_path, skybox_path
+                        ));
+                        let (hdr_buf, ibl_buf, sky_buf) = self.ui.environment_paths_mut();
+                        write_string_to_buffer(&hdr_path_string, hdr_buf);
+                        write_string_to_buffer(&ibl_path, ibl_buf);
+                        write_string_to_buffer(&skybox_path, sky_buf);
                     }
-                    if object.scale != scale {
-                        object.scale = scale;
-                        changed = true;
+                    Err(message) => {
+                        self.ui.set_environment_status(message);
                     }
-                    if changed {
-                        let matrix =
-                            compose_transform_matrix(object.position, object.rotation_deg, object.scale);
-                        render.set_entity_transform(object.root_entity, matrix);
+                }
+            }
+            if environment_apply {
+                if ibl_path_string.is_empty() && skybox_path_string.is_empty() {
+                    self.ui.set_environment_status(
+                        "Environment load failed: provide KTX paths or generate from HDR.".to_string(),
+                    );
+                } else {
+                    let ok = render.set_environment(
+                        &ibl_path_string,
+                        &skybox_path_string,
+                        environment_intensity,
+                    );
+                    if ok {
+                        self.scene.set_environment_present(true);
+                        self.ui
+                            .set_environment_status("Environment loaded.".to_string());
+                    } else {
+                        self.ui.set_environment_status(format!(
+                            "Environment load failed for:\nIBL: {}\nSkybox: {}",
+                            ibl_path_string, skybox_path_string
+                        ));
                     }
+                }
+            }
+            apply_material_changes(
+                &mut self.assets,
+                selected_material_index,
+                previous_material_selection,
+                previous_material_params,
+                material_params,
+            );
+            if selected_material_index != previous_material_selection {
+                if let Some(params) =
+                    load_material_params(&mut self.assets, selected_material_index)
+                {
+                    self.ui.set_material_params(params);
                 }
             }
         }
@@ -415,6 +522,133 @@ impl App {
         render.ui_key_event(IMGUI_MOD_ALT, state.alt_key());
         render.ui_key_event(IMGUI_MOD_SUPER, state.super_key());
     }
+}
+
+fn buffer_to_string(buffer: &[u8]) -> String {
+    let end = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    String::from_utf8_lossy(&buffer[..end]).trim().to_string()
+}
+
+fn write_string_to_buffer(value: &str, buffer: &mut [u8]) {
+    buffer.fill(0);
+    let bytes = value.as_bytes();
+    if buffer.is_empty() {
+        return;
+    }
+    let max_len = buffer.len().saturating_sub(1);
+    let count = bytes.len().min(max_len);
+    buffer[..count].copy_from_slice(&bytes[..count]);
+}
+
+fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
+    if hdr_path.trim().is_empty() {
+        return Err("Provide an equirect HDR path to generate KTX.".to_string());
+    }
+    let hdr = PathBuf::from(hdr_path.trim());
+    if !hdr.exists() {
+        return Err(format!("HDR file not found: {}", hdr.display()));
+    }
+
+    let stem = hdr
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("environment");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output_root = manifest_dir.join("assets").join("environments");
+    let output_prefix = output_root.join(stem);
+    std::fs::create_dir_all(&output_root)
+        .map_err(|err| format!("Failed creating environment folder: {}", err))?;
+
+    let cmgen_path = PathBuf::from(env!("FILAMENT_BIN_DIR")).join("cmgen.exe");
+    if !cmgen_path.exists() {
+        return Err(format!("cmgen not found at {}", cmgen_path.display()));
+    }
+
+    let status = Command::new(cmgen_path)
+        .args([
+            "-x",
+            output_prefix.to_string_lossy().as_ref(),
+            "--format=ktx",
+            "--size=256",
+            "--extract-blur=0.1",
+        ])
+        .arg(&hdr)
+        .status()
+        .map_err(|err| format!("Failed to run cmgen: {}", err))?;
+
+    if !status.success() {
+        return Err(format!(
+            "cmgen failed with status {:?}.",
+            status.code()
+        ));
+    }
+
+    let output_dir = output_root.join(stem);
+    let ibl_path = output_dir.join(format!("{stem}_ibl.ktx"));
+    let skybox_path = output_dir.join(format!("{stem}_skybox.ktx"));
+    Ok((
+        ibl_path.to_string_lossy().to_string(),
+        skybox_path.to_string_lossy().to_string(),
+    ))
+}
+
+fn apply_material_changes(
+    assets: &mut AssetManager,
+    selected_index: i32,
+    previous_index: i32,
+    previous_params: MaterialParams,
+    params: MaterialParams,
+) {
+    if selected_index < 0 || selected_index != previous_index {
+        return;
+    }
+    if previous_params == params {
+        return;
+    }
+    let Some(material_instance) = assets.material_instances_mut().get_mut(selected_index as usize) else {
+        return;
+    };
+
+    if material_instance.has_parameter("baseColorFactor") {
+        material_instance.set_float4("baseColorFactor", params.base_color_rgba);
+    }
+    if material_instance.has_parameter("metallicFactor") {
+        material_instance.set_float("metallicFactor", params.metallic);
+    }
+    if material_instance.has_parameter("roughnessFactor") {
+        material_instance.set_float("roughnessFactor", params.roughness);
+    }
+    if material_instance.has_parameter("emissiveFactor") {
+        material_instance.set_float3("emissiveFactor", params.emissive_rgb);
+    }
+}
+
+fn load_material_params(assets: &mut AssetManager, selected_index: i32) -> Option<MaterialParams> {
+    if selected_index < 0 {
+        return None;
+    }
+    let material_instance = assets.material_instances().get(selected_index as usize)?;
+    let mut params = MaterialParams {
+        base_color_rgba: [1.0, 1.0, 1.0, 1.0],
+        metallic: 1.0,
+        roughness: 1.0,
+        emissive_rgb: [0.0, 0.0, 0.0],
+    };
+
+    if let Some(value) = material_instance.get_float4("baseColorFactor") {
+        params.base_color_rgba = value;
+    }
+    if let Some(value) = material_instance.get_float("metallicFactor") {
+        params.metallic = value;
+    }
+    if let Some(value) = material_instance.get_float("roughnessFactor") {
+        params.roughness = value;
+    }
+    if let Some(value) = material_instance.get_float3("emissiveFactor") {
+        params.emissive_rgb = value;
+    }
+
+    Some(params)
 }
 
 impl ApplicationHandler for App {

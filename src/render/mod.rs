@@ -3,7 +3,8 @@ mod camera;
 pub use camera::{CameraController, CameraMovement};
 
 use crate::filament::{
-    Backend, Camera, Engine, Entity, ImGuiHelper, Renderer, Scene, SwapChain, View,
+    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox, SwapChain,
+    Texture, View,
 };
 use std::ffi::CString;
 use std::ffi::c_void;
@@ -23,6 +24,10 @@ pub struct RenderContext {
     scene: Scene,
     camera: Camera,
     light_entity: Option<Entity>,
+    indirect_light: Option<IndirectLight>,
+    indirect_light_texture: Option<Texture>,
+    skybox: Option<Skybox>,
+    skybox_texture: Option<Texture>,
 }
 
 impl RenderContext {
@@ -68,6 +73,10 @@ impl RenderContext {
             scene,
             camera,
             light_entity: Some(light_entity),
+            indirect_light: None,
+            indirect_light_texture: None,
+            skybox: None,
+            skybox_texture: None,
         }
     }
 
@@ -77,6 +86,10 @@ impl RenderContext {
 
     pub fn camera_mut(&mut self) -> &mut Camera {
         &mut self.camera
+    }
+
+    pub fn light_entity(&self) -> Option<Entity> {
+        self.light_entity
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
@@ -174,30 +187,58 @@ impl RenderContext {
         assets_body: &str,
         object_names: &[CString],
         selected_index: &mut i32,
+        can_edit_transform: &mut bool,
         position_xyz: &mut [f32; 3],
         rotation_deg_xyz: &mut [f32; 3],
         scale_xyz: &mut [f32; 3],
         light_color_rgb: &mut [f32; 3],
         light_intensity: &mut f32,
         light_dir_xyz: &mut [f32; 3],
+        material_names: &[CString],
+        selected_material_index: &mut i32,
+        material_base_color_rgba: &mut [f32; 4],
+        material_metallic: &mut f32,
+        material_roughness: &mut f32,
+        material_emissive_rgb: &mut [f32; 3],
+        hdr_path: &mut [u8],
+        ibl_path: &mut [u8],
+        skybox_path: &mut [u8],
+        environment_intensity: &mut f32,
+        environment_apply: &mut bool,
+        environment_generate: &mut bool,
         delta_seconds: f32,
     ) -> f32 {
         let frame_start = std::time::Instant::now();
         if let Some(ui_helper) = &mut self.ui_helper {
             let name_ptrs: Vec<*const std::ffi::c_char> =
                 object_names.iter().map(|name| name.as_ptr()).collect();
+            let material_ptrs: Vec<*const std::ffi::c_char> =
+                material_names.iter().map(|name| name.as_ptr()).collect();
             ui_helper.render_scene_ui(
                 delta_seconds,
                 assets_title,
                 assets_body,
                 &name_ptrs,
                 selected_index,
+                can_edit_transform,
                 position_xyz,
                 rotation_deg_xyz,
                 scale_xyz,
                 light_color_rgb,
                 light_intensity,
                 light_dir_xyz,
+                &material_ptrs,
+                selected_material_index,
+                material_base_color_rgba,
+                material_metallic,
+                material_roughness,
+                material_emissive_rgb,
+                hdr_path,
+                ibl_path,
+                skybox_path,
+                environment_intensity,
+                environment_apply,
+                environment_generate,
             );
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {
@@ -229,6 +270,54 @@ impl RenderContext {
     pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) {
         let mut tm = self.engine.transform_manager();
         tm.set_transform(entity, &matrix4x4);
+    }
+
+    pub fn set_environment(
+        &mut self,
+        ibl_path: &str,
+        skybox_path: &str,
+        intensity: f32,
+    ) -> bool {
+        if ibl_path.is_empty() && skybox_path.is_empty() {
+            return false;
+        }
+
+        self.scene.set_indirect_light(None);
+        self.scene.set_skybox(None);
+        self.indirect_light = None;
+        self.indirect_light_texture = None;
+        self.skybox = None;
+        self.skybox_texture = None;
+
+        if !ibl_path.is_empty() {
+            if let Some((light, texture)) =
+                self.engine.create_indirect_light_from_ktx(ibl_path, intensity)
+            {
+                self.scene.set_indirect_light(Some(&light));
+                self.indirect_light = Some(light);
+                self.indirect_light_texture = Some(texture);
+            } else {
+                return false;
+            }
+        }
+
+        if !skybox_path.is_empty() {
+            if let Some((skybox, texture)) = self.engine.create_skybox_from_ktx(skybox_path) {
+                self.scene.set_skybox(Some(&skybox));
+                self.skybox = Some(skybox);
+                self.skybox_texture = Some(texture);
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn set_environment_intensity(&mut self, intensity: f32) {
+        if let Some(light) = &mut self.indirect_light {
+            light.set_intensity(intensity);
+        }
     }
 }
 

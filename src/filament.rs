@@ -236,6 +236,55 @@ impl Engine {
         }
     }
 
+    /// Create an indirect light from a KTX environment map.
+    pub fn create_indirect_light_from_ktx(
+        &mut self,
+        ktx_path: &str,
+        intensity: f32,
+    ) -> Option<(IndirectLight, Texture)> {
+        let c_path = CString::new(ktx_path).expect("Invalid KTX path");
+        unsafe {
+            let mut texture_ptr: *mut c_void = std::ptr::null_mut();
+            let light_ptr = ffi::filament_create_indirect_light_from_ktx(
+                self.ptr.as_ptr() as *mut _,
+                c_path.as_ptr(),
+                intensity,
+                &mut texture_ptr as *mut *mut c_void,
+            );
+            let light = NonNull::new(light_ptr as *mut c_void).map(|ptr| IndirectLight {
+                ptr,
+                engine: self.ptr,
+            })?;
+            let texture = NonNull::new(texture_ptr).map(|ptr| Texture {
+                ptr,
+                engine: self.ptr,
+            })?;
+            Some((light, texture))
+        }
+    }
+
+    /// Create a skybox from a KTX cubemap.
+    pub fn create_skybox_from_ktx(&mut self, ktx_path: &str) -> Option<(Skybox, Texture)> {
+        let c_path = CString::new(ktx_path).expect("Invalid KTX path");
+        unsafe {
+            let mut texture_ptr: *mut c_void = std::ptr::null_mut();
+            let skybox_ptr = ffi::filament_create_skybox_from_ktx(
+                self.ptr.as_ptr() as *mut _,
+                c_path.as_ptr(),
+                &mut texture_ptr as *mut *mut c_void,
+            );
+            let skybox = NonNull::new(skybox_ptr as *mut c_void).map(|ptr| Skybox {
+                ptr,
+                engine: self.ptr,
+            })?;
+            let texture = NonNull::new(texture_ptr).map(|ptr| Texture {
+                ptr,
+                engine: self.ptr,
+            })?;
+            Some((skybox, texture))
+        }
+    }
+
     /// Create a material from package bytes
     pub fn create_material(&mut self, package: &[u8]) -> Option<Material> {
         unsafe {
@@ -407,12 +456,91 @@ impl Scene {
             ffi::filament_scene_remove_entity(self.ptr.as_ptr() as *mut _, entity.id);
         }
     }
+
+    /// Set the indirect light for the scene.
+    pub fn set_indirect_light(&mut self, light: Option<&IndirectLight>) {
+        unsafe {
+            let ptr = light
+                .map(|value| value.ptr.as_ptr() as *mut _)
+                .unwrap_or(std::ptr::null_mut());
+            ffi::filament_scene_set_indirect_light(self.ptr.as_ptr() as *mut _, ptr);
+        }
+    }
+
+    /// Set the skybox for the scene.
+    pub fn set_skybox(&mut self, skybox: Option<&Skybox>) {
+        unsafe {
+            let ptr = skybox
+                .map(|value| value.ptr.as_ptr() as *mut _)
+                .unwrap_or(std::ptr::null_mut());
+            ffi::filament_scene_set_skybox(self.ptr.as_ptr() as *mut _, ptr);
+        }
+    }
 }
 
 impl Drop for Scene {
     fn drop(&mut self) {
         unsafe {
             ffi::filament_engine_destroy_scene(
+                self.engine.as_ptr() as *mut _,
+                self.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+}
+
+/// Texture
+pub struct Texture {
+    ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_engine_destroy_texture(
+                self.engine.as_ptr() as *mut _,
+                self.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+}
+
+/// Indirect light
+pub struct IndirectLight {
+    ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
+}
+
+impl IndirectLight {
+    pub fn set_intensity(&mut self, intensity: f32) {
+        unsafe {
+            ffi::filament_indirect_light_set_intensity(self.ptr.as_ptr() as *mut _, intensity);
+        }
+    }
+}
+
+impl Drop for IndirectLight {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_engine_destroy_indirect_light(
+                self.engine.as_ptr() as *mut _,
+                self.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+}
+
+/// Skybox
+pub struct Skybox {
+    ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
+}
+
+impl Drop for Skybox {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_engine_destroy_skybox(
                 self.engine.as_ptr() as *mut _,
                 self.ptr.as_ptr() as *mut _,
             );
@@ -618,6 +746,104 @@ impl MaterialInstance {
     pub fn as_ptr(&self) -> *mut c_void {
         self.ptr.as_ptr()
     }
+
+    pub fn name(&self) -> String {
+        unsafe {
+            let ptr = ffi::filament_material_instance_get_name(self.ptr.as_ptr() as *mut _);
+            if ptr.is_null() {
+                return "Material".to_string();
+            }
+            let c_str = std::ffi::CStr::from_ptr(ptr);
+            c_str.to_string_lossy().to_string()
+        }
+    }
+
+    pub fn has_parameter(&self, name: &str) -> bool {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        unsafe {
+            ffi::filament_material_instance_has_parameter(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+            )
+        }
+    }
+
+    pub fn set_float(&mut self, name: &str, value: f32) {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        unsafe {
+            ffi::filament_material_instance_set_float(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                value,
+            );
+        }
+    }
+
+    pub fn set_float3(&mut self, name: &str, value: [f32; 3]) {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        unsafe {
+            ffi::filament_material_instance_set_float3(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                value[0],
+                value[1],
+                value[2],
+            );
+        }
+    }
+
+    pub fn set_float4(&mut self, name: &str, value: [f32; 4]) {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        unsafe {
+            ffi::filament_material_instance_set_float4(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                value[0],
+                value[1],
+                value[2],
+                value[3],
+            );
+        }
+    }
+
+    pub fn get_float(&self, name: &str) -> Option<f32> {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        let mut value = 0.0f32;
+        let ok = unsafe {
+            ffi::filament_material_instance_get_float(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                &mut value as *mut f32,
+            )
+        };
+        if ok { Some(value) } else { None }
+    }
+
+    pub fn get_float3(&self, name: &str) -> Option<[f32; 3]> {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        let mut value = [0.0f32; 3];
+        let ok = unsafe {
+            ffi::filament_material_instance_get_float3(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                value.as_mut_ptr(),
+            )
+        };
+        if ok { Some(value) } else { None }
+    }
+
+    pub fn get_float4(&self, name: &str) -> Option<[f32; 4]> {
+        let c_name = CString::new(name).expect("Invalid parameter name");
+        let mut value = [0.0f32; 4];
+        let ok = unsafe {
+            ffi::filament_material_instance_get_float4(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                value.as_mut_ptr(),
+            )
+        };
+        if ok { Some(value) } else { None }
+    }
 }
 
 // Note: MaterialInstance drop is complex because default instances aren't owned
@@ -813,6 +1039,32 @@ impl GltfAsset {
             Entity { id }
         }
     }
+
+    pub fn material_instances(&mut self) -> (Vec<MaterialInstance>, Vec<String>) {
+        let mut instances = Vec::new();
+        let mut names = Vec::new();
+        let instance_ptr = unsafe { ffi::filament_gltfio_asset_get_instance(self.ptr.as_ptr() as *mut _) };
+        let Some(instance) = NonNull::new(instance_ptr as *mut c_void) else {
+            return (instances, names);
+        };
+        let count = unsafe {
+            ffi::filament_gltfio_instance_get_material_instance_count(instance.as_ptr() as *mut _)
+        };
+        for index in 0..count {
+            let mi_ptr = unsafe {
+                ffi::filament_gltfio_instance_get_material_instance(
+                    instance.as_ptr() as *mut _,
+                    index,
+                )
+            };
+            if let Some(mi) = NonNull::new(mi_ptr as *mut c_void) {
+                let material = MaterialInstance { ptr: mi, owned: false };
+                names.push(material.name());
+                instances.push(material);
+            }
+        }
+        (instances, names)
+    }
 }
 
 impl Drop for GltfAsset {
@@ -907,12 +1159,25 @@ impl ImGuiHelper {
         assets_body: &str,
         object_names: &[*const c_char],
         selected_index: &mut i32,
+        can_edit_transform: &mut bool,
         position_xyz: &mut [f32; 3],
         rotation_deg_xyz: &mut [f32; 3],
         scale_xyz: &mut [f32; 3],
         light_color_rgb: &mut [f32; 3],
         light_intensity: &mut f32,
         light_dir_xyz: &mut [f32; 3],
+        material_names: &[*const c_char],
+        selected_material_index: &mut i32,
+        material_base_color_rgba: &mut [f32; 4],
+        material_metallic: &mut f32,
+        material_roughness: &mut f32,
+        material_emissive_rgb: &mut [f32; 3],
+        hdr_path: &mut [u8],
+        ibl_path: &mut [u8],
+        skybox_path: &mut [u8],
+        environment_intensity: &mut f32,
+        environment_apply: &mut bool,
+        environment_generate: &mut bool,
     ) {
         let c_title = CString::new(assets_title).expect("Invalid title");
         let c_body = CString::new(assets_body).expect("Invalid body");
@@ -920,6 +1185,11 @@ impl ImGuiHelper {
             std::ptr::null()
         } else {
             object_names.as_ptr()
+        };
+        let material_ptr = if material_names.is_empty() {
+            std::ptr::null()
+        } else {
+            material_names.as_ptr()
         };
         unsafe {
             ffi::filagui_imgui_helper_render_scene_ui(
@@ -930,12 +1200,29 @@ impl ImGuiHelper {
                 names_ptr,
                 object_names.len() as i32,
                 selected_index as *mut i32,
+                can_edit_transform as *mut bool,
                 position_xyz.as_mut_ptr(),
                 rotation_deg_xyz.as_mut_ptr(),
                 scale_xyz.as_mut_ptr(),
                 light_color_rgb.as_mut_ptr(),
                 light_intensity as *mut f32,
                 light_dir_xyz.as_mut_ptr(),
+                material_ptr,
+                material_names.len() as i32,
+                selected_material_index as *mut i32,
+                material_base_color_rgba.as_mut_ptr(),
+                material_metallic as *mut f32,
+                material_roughness as *mut f32,
+                material_emissive_rgb.as_mut_ptr(),
+                hdr_path.as_mut_ptr() as *mut c_char,
+                hdr_path.len() as i32,
+                ibl_path.as_mut_ptr() as *mut c_char,
+                ibl_path.len() as i32,
+                skybox_path.as_mut_ptr() as *mut c_char,
+                skybox_path.len() as i32,
+                environment_intensity as *mut f32,
+                environment_apply as *mut bool,
+                environment_generate as *mut bool,
             );
         }
     }

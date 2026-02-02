@@ -1,6 +1,6 @@
 use crate::filament::{
     Engine, Entity, EntityManager, GltfAsset, GltfAssetLoader, GltfMaterialProvider,
-    GltfResourceLoader, GltfTextureProvider, Scene,
+    GltfResourceLoader, GltfTextureProvider, MaterialInstance, Scene,
 };
 use std::path::PathBuf;
 
@@ -21,6 +21,8 @@ pub struct AssetManager {
     gltf_texture_provider: Option<GltfTextureProvider>,
     gltf_material_provider: Option<GltfMaterialProvider>,
     loaded_assets: Vec<LoadedAsset>,
+    material_instances: Vec<MaterialInstance>,
+    material_names: Vec<String>,
 }
 
 impl AssetManager {
@@ -32,11 +34,25 @@ impl AssetManager {
             gltf_texture_provider: None,
             gltf_material_provider: None,
             loaded_assets: Vec::new(),
+            material_instances: Vec::new(),
+            material_names: Vec::new(),
         }
     }
 
     pub fn loaded_assets(&self) -> &[LoadedAsset] {
         &self.loaded_assets
+    }
+
+    pub fn material_instances(&self) -> &[MaterialInstance] {
+        &self.material_instances
+    }
+
+    pub fn material_instances_mut(&mut self) -> &mut [MaterialInstance] {
+        &mut self.material_instances
+    }
+
+    pub fn material_names(&self) -> &[String] {
+        &self.material_names
     }
 
     pub fn load_gltf_from_path(
@@ -94,6 +110,12 @@ impl AssetManager {
         self.gltf_resource_loader = Some(resource_loader);
         self.gltf_texture_provider = Some(texture_provider);
         self.gltf_material_provider = Some(material_provider);
+
+        if let Some(asset) = self.gltf_asset.as_mut() {
+            let (instances, names) = asset.material_instances();
+            self.material_instances.extend(instances);
+            self.material_names.extend(names);
+        }
         self.loaded_assets.push(loaded_asset.clone());
         loaded_asset
     }

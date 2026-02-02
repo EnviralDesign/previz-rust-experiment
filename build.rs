@@ -111,6 +111,9 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <filament/SwapChain.h>
 #include <filament/Material.h>
 #include <filament/MaterialInstance.h>
+#include <filament/IndirectLight.h>
+#include <filament/Skybox.h>
+#include <filament/Texture.h>
 #include <filament/LightManager.h>
 #include <filament/TransformManager.h>
 #include <filament/Box.h>
@@ -125,15 +128,41 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <filament/TransformManager.h>
 #include <gltfio/AssetLoader.h>
 #include <gltfio/FilamentAsset.h>
+#include <gltfio/FilamentInstance.h>
 #include <gltfio/MaterialProvider.h>
 #include <gltfio/ResourceLoader.h>
 #include <gltfio/TextureProvider.h>
 #include <utils/EntityManager.h>
 #include <backend/DriverEnums.h>
+#include <image/Ktx1Bundle.h>
+#include <ktxreader/Ktx1Reader.h>
+#include <fstream>
+#include <vector>
 
 using namespace filament;
 using namespace utils;
 using namespace filament::gltfio;
+
+static bool read_file_bytes(const char* path, std::vector<uint8_t>& out) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return false;
+    }
+    const auto size = file.tellg();
+    if (size <= 0) {
+        return false;
+    }
+    out.resize(static_cast<size_t>(size));
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(out.data()), size)) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
 
 extern "C" {
 
@@ -280,6 +309,94 @@ void filament_scene_remove_entity(Scene* scene, int32_t entity_id) {
     scene->remove(entity);
 }
 
+void filament_scene_set_indirect_light(Scene* scene, IndirectLight* light) {
+    scene->setIndirectLight(light);
+}
+
+void filament_scene_set_skybox(Scene* scene, Skybox* skybox) {
+    scene->setSkybox(skybox);
+}
+
+// ============================================================================
+// Environment
+// ============================================================================
+
+IndirectLight* filament_create_indirect_light_from_ktx(
+    Engine* engine,
+    const char* ktx_path,
+    float intensity,
+    Texture** out_texture
+) {
+    if (!engine || !ktx_path || !out_texture) {
+        return nullptr;
+    }
+    std::vector<uint8_t> bytes;
+    if (!read_file_bytes(ktx_path, bytes)) {
+        return nullptr;
+    }
+    auto* bundle = new image::Ktx1Bundle(bytes.data(), (uint32_t)bytes.size());
+    filament::math::float3 sh[9];
+    bool has_sh = bundle->getSphericalHarmonics(sh);
+    Texture* texture = ktxreader::Ktx1Reader::createTexture(engine, bundle, false);
+    if (!texture) {
+        return nullptr;
+    }
+    IndirectLight::Builder builder;
+    builder.reflections(texture).intensity(intensity);
+    if (has_sh) {
+        builder.irradiance(3, sh);
+    }
+    IndirectLight* light = builder.build(*engine);
+    *out_texture = texture;
+    return light;
+}
+
+Skybox* filament_create_skybox_from_ktx(
+    Engine* engine,
+    const char* ktx_path,
+    Texture** out_texture
+) {
+    if (!engine || !ktx_path || !out_texture) {
+        return nullptr;
+    }
+    std::vector<uint8_t> bytes;
+    if (!read_file_bytes(ktx_path, bytes)) {
+        return nullptr;
+    }
+    auto* bundle = new image::Ktx1Bundle(bytes.data(), (uint32_t)bytes.size());
+    Texture* texture = ktxreader::Ktx1Reader::createTexture(engine, bundle, true);
+    if (!texture) {
+        return nullptr;
+    }
+    Skybox* skybox = Skybox::Builder().environment(texture).build(*engine);
+    *out_texture = texture;
+    return skybox;
+}
+
+void filament_indirect_light_set_intensity(IndirectLight* light, float intensity) {
+    if (light) {
+        light->setIntensity(intensity);
+    }
+}
+
+void filament_engine_destroy_indirect_light(Engine* engine, IndirectLight* light) {
+    if (engine && light) {
+        engine->destroy(light);
+    }
+}
+
+void filament_engine_destroy_skybox(Engine* engine, Skybox* skybox) {
+    if (engine && skybox) {
+        engine->destroy(skybox);
+    }
+}
+
+void filament_engine_destroy_texture(Engine* engine, Texture* texture) {
+    if (engine && texture) {
+        engine->destroy(texture);
+    }
+}
+
 // ============================================================================
 // Camera
 // ============================================================================
@@ -350,6 +467,122 @@ MaterialInstance* filament_material_get_default_instance(Material* material) {
 
 MaterialInstance* filament_material_create_instance(Material* material) {
     return material->createInstance();
+}
+
+const char* filament_material_instance_get_name(MaterialInstance* instance) {
+    if (!instance) {
+        return nullptr;
+    }
+    return instance->getName();
+}
+
+bool filament_material_instance_has_parameter(MaterialInstance* instance, const char* name) {
+    if (!instance || !name) {
+        return false;
+    }
+    Material const* material = instance->getMaterial();
+    return material ? material->hasParameter(name) : false;
+}
+
+void filament_material_instance_set_float(MaterialInstance* instance, const char* name, float value) {
+    if (!instance || !name) {
+        return;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return;
+    }
+    instance->setParameter(name, value);
+}
+
+void filament_material_instance_set_float3(
+    MaterialInstance* instance,
+    const char* name,
+    float x,
+    float y,
+    float z
+) {
+    if (!instance || !name) {
+        return;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return;
+    }
+    instance->setParameter(name, filament::math::float3{x, y, z});
+}
+
+void filament_material_instance_set_float4(
+    MaterialInstance* instance,
+    const char* name,
+    float x,
+    float y,
+    float z,
+    float w
+) {
+    if (!instance || !name) {
+        return;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return;
+    }
+    instance->setParameter(name, filament::math::float4{x, y, z, w});
+}
+
+bool filament_material_instance_get_float(
+    MaterialInstance* instance,
+    const char* name,
+    float* out_value
+) {
+    if (!instance || !name || !out_value) {
+        return false;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return false;
+    }
+    *out_value = instance->getParameter<float>(name);
+    return true;
+}
+
+bool filament_material_instance_get_float3(
+    MaterialInstance* instance,
+    const char* name,
+    float* out_value
+) {
+    if (!instance || !name || !out_value) {
+        return false;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return false;
+    }
+    filament::math::float3 value = instance->getParameter<filament::math::float3>(name);
+    out_value[0] = value.x;
+    out_value[1] = value.y;
+    out_value[2] = value.z;
+    return true;
+}
+
+bool filament_material_instance_get_float4(
+    MaterialInstance* instance,
+    const char* name,
+    float* out_value
+) {
+    if (!instance || !name || !out_value) {
+        return false;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return false;
+    }
+    filament::math::float4 value = instance->getParameter<filament::math::float4>(name);
+    out_value[0] = value.x;
+    out_value[1] = value.y;
+    out_value[2] = value.z;
+    out_value[3] = value.w;
+    return true;
 }
 
 // ============================================================================
@@ -688,6 +921,34 @@ int32_t filament_gltfio_asset_get_root(FilamentAsset* asset) {
     return Entity::smuggle(entity);
 }
 
+FilamentInstance* filament_gltfio_asset_get_instance(FilamentAsset* asset) {
+    if (!asset) {
+        return nullptr;
+    }
+    return asset->getInstance();
+}
+
+int32_t filament_gltfio_instance_get_material_instance_count(FilamentInstance* instance) {
+    if (!instance) {
+        return 0;
+    }
+    return static_cast<int32_t>(instance->getMaterialInstanceCount());
+}
+
+MaterialInstance* filament_gltfio_instance_get_material_instance(
+    FilamentInstance* instance,
+    int32_t index
+) {
+    if (!instance) {
+        return nullptr;
+    }
+    const size_t count = instance->getMaterialInstanceCount();
+    if (index < 0 || static_cast<size_t>(index) >= count) {
+        return nullptr;
+    }
+    return instance->getMaterialInstances()[index];
+}
+
 // ============================================================================
 // filagui
 // ============================================================================
@@ -913,12 +1174,29 @@ void filagui_imgui_helper_render_scene_ui(
     const char** object_names,
     int object_count,
     int* selected_index,
+    bool* can_edit_transform,
     float* position_xyz,
     float* rotation_deg_xyz,
     float* scale_xyz,
     float* light_color_rgb,
     float* light_intensity,
-    float* light_dir_xyz
+    float* light_dir_xyz,
+    const char** material_names,
+    int material_count,
+    int* selected_material_index,
+    float* material_base_color_rgba,
+    float* material_metallic,
+    float* material_roughness,
+    float* material_emissive_rgb,
+    char* hdr_path,
+    int hdr_path_capacity,
+    char* ibl_path,
+    int ibl_path_capacity,
+    char* skybox_path,
+    int skybox_path_capacity,
+    float* environment_intensity,
+    bool* environment_apply,
+    bool* environment_generate
 ) {
     if (!helper) {
         return;
@@ -958,7 +1236,8 @@ void filagui_imgui_helper_render_scene_ui(
         ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
         ImGui::Begin("Transform");
         bool has_selection = selected_index && *selected_index >= 0;
-        if (!has_selection) {
+        bool allow_transform = has_selection && (!can_edit_transform || *can_edit_transform);
+        if (!allow_transform) {
             ImGui::BeginDisabled();
         }
         if (position_xyz) {
@@ -970,8 +1249,38 @@ void filagui_imgui_helper_render_scene_ui(
         if (scale_xyz) {
             ImGui::InputFloat3("Scale", scale_xyz, "%.3f");
         }
-        if (!has_selection) {
+        if (!allow_transform) {
             ImGui::EndDisabled();
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(830, 220), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Environment");
+        if (hdr_path && hdr_path_capacity > 0) {
+            ImGui::InputText("Equirect HDR", hdr_path, (size_t)hdr_path_capacity);
+        }
+        if (ibl_path && ibl_path_capacity > 0) {
+            ImGui::InputText("IBL KTX", ibl_path, (size_t)ibl_path_capacity);
+        }
+        if (skybox_path && skybox_path_capacity > 0) {
+            ImGui::InputText("Skybox KTX", skybox_path, (size_t)skybox_path_capacity);
+        }
+        if (environment_intensity) {
+            ImGui::SliderFloat("Intensity", environment_intensity, 0.0f, 200000.0f, "%.1f");
+        }
+        if (environment_generate) {
+            *environment_generate = false;
+            if (ImGui::Button("Generate KTX")) {
+                *environment_generate = true;
+            }
+        }
+        ImGui::SameLine();
+        if (environment_apply) {
+            *environment_apply = false;
+            if (ImGui::Button("Load Environment")) {
+                *environment_apply = true;
+            }
         }
         ImGui::End();
 
@@ -998,6 +1307,49 @@ void filagui_imgui_helper_render_scene_ui(
                     light_dir_xyz[2] = z / len;
                 }
             }
+        }
+        ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(390, 500), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Materials");
+        if (!material_names || material_count <= 0) {
+            ImGui::TextUnformatted("No materials loaded.");
+        } else {
+            int current = selected_material_index ? *selected_material_index : -1;
+            if (current < 0 || current >= material_count) {
+                current = -1;
+            }
+            for (int i = 0; i < material_count; ++i) {
+                const char* name = material_names[i] ? material_names[i] : "Material";
+                bool selected = (i == current);
+                if (ImGui::Selectable(name, selected)) {
+                    if (selected_material_index) {
+                        *selected_material_index = i;
+                    }
+                    current = i;
+                }
+            }
+        }
+        ImGui::Separator();
+        bool has_material = selected_material_index && *selected_material_index >= 0;
+        if (!has_material) {
+            ImGui::BeginDisabled();
+        }
+        if (material_base_color_rgba) {
+            ImGui::ColorEdit4("Base Color", material_base_color_rgba);
+        }
+        if (material_metallic) {
+            ImGui::SliderFloat("Metallic", material_metallic, 0.0f, 1.0f, "%.3f");
+        }
+        if (material_roughness) {
+            ImGui::SliderFloat("Roughness", material_roughness, 0.0f, 1.0f, "%.3f");
+        }
+        if (material_emissive_rgb) {
+            ImGui::ColorEdit3("Emissive", material_emissive_rgb);
+        }
+        if (!has_material) {
+            ImGui::EndDisabled();
         }
         ImGui::End();
     });
@@ -1129,6 +1481,9 @@ pub type TransformManager = c_void;
 pub type RenderableManager = c_void;
 pub type Material = c_void;
 pub type MaterialInstance = c_void;
+pub type Texture = c_void;
+pub type IndirectLight = c_void;
+pub type Skybox = c_void;
 pub type VertexBuffer = c_void;
 pub type IndexBuffer = c_void;
 pub type MaterialProvider = c_void;
@@ -1136,6 +1491,7 @@ pub type AssetLoader = c_void;
 pub type ResourceLoader = c_void;
 pub type TextureProvider = c_void;
 pub type FilamentAsset = c_void;
+pub type FilamentInstance = c_void;
 pub type ImGuiHelper = c_void;
 
 // Builder wrapper types (opaque)
@@ -1218,6 +1574,28 @@ extern "C" {
     
     pub fn filament_scene_add_entity(scene: *mut Scene, entity: i32);
     pub fn filament_scene_remove_entity(scene: *mut Scene, entity: i32);
+    pub fn filament_scene_set_indirect_light(scene: *mut Scene, light: *mut IndirectLight);
+    pub fn filament_scene_set_skybox(scene: *mut Scene, skybox: *mut Skybox);
+
+    // ========================================================================
+    // Environment
+    // ========================================================================
+    
+    pub fn filament_create_indirect_light_from_ktx(
+        engine: *mut Engine,
+        ktx_path: *const c_char,
+        intensity: f32,
+        out_texture: *mut *mut Texture,
+    ) -> *mut IndirectLight;
+    pub fn filament_create_skybox_from_ktx(
+        engine: *mut Engine,
+        ktx_path: *const c_char,
+        out_texture: *mut *mut Texture,
+    ) -> *mut Skybox;
+    pub fn filament_indirect_light_set_intensity(light: *mut IndirectLight, intensity: f32);
+    pub fn filament_engine_destroy_indirect_light(engine: *mut Engine, light: *mut IndirectLight);
+    pub fn filament_engine_destroy_skybox(engine: *mut Engine, skybox: *mut Skybox);
+    pub fn filament_engine_destroy_texture(engine: *mut Engine, texture: *mut Texture);
     
     // ========================================================================
     // Camera
@@ -1279,6 +1657,46 @@ extern "C" {
         material: *mut Material,
     ) -> *mut MaterialInstance;
     pub fn filament_material_create_instance(material: *mut Material) -> *mut MaterialInstance;
+    pub fn filament_material_instance_get_name(instance: *mut MaterialInstance) -> *const c_char;
+    pub fn filament_material_instance_has_parameter(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+    ) -> bool;
+    pub fn filament_material_instance_set_float(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        value: f32,
+    );
+    pub fn filament_material_instance_set_float3(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        x: f32,
+        y: f32,
+        z: f32,
+    );
+    pub fn filament_material_instance_set_float4(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        x: f32,
+        y: f32,
+        z: f32,
+        w: f32,
+    );
+    pub fn filament_material_instance_get_float(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        out_value: *mut f32,
+    ) -> bool;
+    pub fn filament_material_instance_get_float3(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        out_value: *mut f32,
+    ) -> bool;
+    pub fn filament_material_instance_get_float4(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        out_value: *mut f32,
+    ) -> bool;
     
     // ========================================================================
     // Vertex Buffer
@@ -1478,6 +1896,14 @@ extern "C" {
         extent_xyz: *mut f32,
     );
     pub fn filament_gltfio_asset_get_root(asset: *mut FilamentAsset) -> i32;
+    pub fn filament_gltfio_asset_get_instance(asset: *mut FilamentAsset) -> *mut FilamentInstance;
+    pub fn filament_gltfio_instance_get_material_instance_count(
+        instance: *mut FilamentInstance,
+    ) -> i32;
+    pub fn filament_gltfio_instance_get_material_instance(
+        instance: *mut FilamentInstance,
+        index: i32,
+    ) -> *mut MaterialInstance;
 
     // ========================================================================
     // filagui
@@ -1547,12 +1973,29 @@ extern "C" {
         object_names: *const *const c_char,
         object_count: i32,
         selected_index: *mut i32,
+        can_edit_transform: *mut bool,
         position_xyz: *mut f32,
         rotation_deg_xyz: *mut f32,
         scale_xyz: *mut f32,
         light_color_rgb: *mut f32,
         light_intensity: *mut f32,
         light_dir_xyz: *mut f32,
+        material_names: *const *const c_char,
+        material_count: i32,
+        selected_material_index: *mut i32,
+        material_base_color_rgba: *mut f32,
+        material_metallic: *mut f32,
+        material_roughness: *mut f32,
+        material_emissive_rgb: *mut f32,
+        hdr_path: *mut c_char,
+        hdr_path_capacity: i32,
+        ibl_path: *mut c_char,
+        ibl_path_capacity: i32,
+        skybox_path: *mut c_char,
+        skybox_path_capacity: i32,
+        environment_intensity: *mut f32,
+        environment_apply: *mut bool,
+        environment_generate: *mut bool,
     );
 }
 "#.to_string()
@@ -1653,6 +2096,10 @@ fn main() {
     
     // Step 5: Link Filament libraries
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!(
+        "cargo:rustc-env=FILAMENT_BIN_DIR={}",
+        filament_dir.join("bin").display()
+    );
     
     // Core Filament libraries (order matters for static linking)
     // The libraries listed here are the ones required for a basic rendering setup
