@@ -120,7 +120,6 @@ fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
 #include <math/mat4.h>
 #include <filagui/ImGuiHelper.h>
 #include <imgui.h>
-#include <imgui_internal.h>
 #include <filament/VertexBuffer.h>
 #include <filament/IndexBuffer.h>
 #include <filament/RenderableManager.h>
@@ -1175,6 +1174,7 @@ void filagui_imgui_helper_render_scene_ui(
     const char** object_names,
     int object_count,
     int* selected_index,
+    int* selected_kind,
     bool* can_edit_transform,
     float* position_xyz,
     float* rotation_deg_xyz,
@@ -1203,76 +1203,15 @@ void filagui_imgui_helper_render_scene_ui(
         return;
     }
     helper->render(delta_seconds, [=](filament::Engine*, filament::View*) {
-        ImGuiIO& io = ImGui::GetIO();
-        bool use_docking = false;
-
-#ifdef IMGUI_HAS_DOCK
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        use_docking = (io.ConfigFlags & ImGuiConfigFlags_DockingEnable) != 0;
-
-        ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_PassthruCentralNode;
-        ImGuiWindowFlags host_flags =
-            ImGuiWindowFlags_NoDocking |
-            ImGuiWindowFlags_NoTitleBar |
-            ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoBringToFrontOnFocus |
-            ImGuiWindowFlags_NoNavFocus;
-
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(viewport->WorkPos);
-        ImGui::SetNextWindowSize(viewport->WorkSize);
-        ImGui::SetNextWindowViewport(viewport->ID);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::Begin("DockSpace", nullptr, host_flags);
-        ImGui::PopStyleVar(2);
+        ImVec2 work_pos = viewport->WorkPos;
+        ImVec2 work_size = viewport->WorkSize;
+        float left_width = work_size.x * 0.22f;
+        float right_width = work_size.x * 0.30f;
+        float gutter = 12.0f;
 
-        ImGuiID dockspace_id = ImGui::GetID("MainDockspace");
-        ImGui::DockSpace(dockspace_id, ImVec2(0, 0), dockspace_flags);
-
-        static bool dock_built = false;
-        if (!dock_built && use_docking) {
-            dock_built = true;
-            ImGui::DockBuilderRemoveNode(dockspace_id);
-            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
-
-            ImGuiID dock_left = 0;
-            ImGuiID dock_right = 0;
-            ImGuiID dock_right_bottom = 0;
-            ImGuiID dock_bottom = 0;
-            ImGuiID dock_main = dockspace_id;
-
-            dock_left = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Left, 0.22f, nullptr, &dock_main);
-            dock_right = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Right, 0.32f, nullptr, &dock_main);
-            dock_right_bottom = ImGui::DockBuilderSplitNode(dock_right, ImGuiDir_Down, 0.45f, nullptr, &dock_right);
-            dock_bottom = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, 0.30f, nullptr, &dock_main);
-
-            ImGui::DockBuilderDockWindow("Hierarchy", dock_left);
-            ImGui::DockBuilderDockWindow("Assets", dock_main);
-            ImGui::DockBuilderDockWindow("Transform", dock_right);
-            ImGui::DockBuilderDockWindow("Materials", dock_right);
-            ImGui::DockBuilderDockWindow("Environment", dock_right_bottom);
-            ImGui::DockBuilderDockWindow("Lighting", dock_bottom);
-            ImGui::DockBuilderFinish(dockspace_id);
-        }
-
-        ImGui::End();
-#endif
-
-        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
-        ImGui::Begin(assets_title ? assets_title : "Assets");
-        if (assets_body) {
-            ImGui::TextUnformatted(assets_body);
-        }
-        ImGui::End();
-
-        if (!use_docking) {
-            ImGui::SetNextWindowPos(ImVec2(12, 220), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(360, 260), ImGuiCond_FirstUseEver);
-        }
+        ImGui::SetNextWindowPos(work_pos, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(left_width, work_size.y), ImGuiCond_FirstUseEver);
         ImGui::Begin("Hierarchy");
         if (!object_names || object_count <= 0) {
             ImGui::TextUnformatted("No objects loaded.");
@@ -1294,133 +1233,140 @@ void filagui_imgui_helper_render_scene_ui(
         }
         ImGui::End();
 
-        if (!use_docking) {
-            ImGui::SetNextWindowPos(ImVec2(390, 220), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
-        }
-        ImGui::Begin("Transform");
-        bool has_selection = selected_index && *selected_index >= 0;
-        bool allow_transform = has_selection && (!can_edit_transform || *can_edit_transform);
-        if (!allow_transform) {
-            ImGui::BeginDisabled();
-        }
-        if (position_xyz) {
-            ImGui::InputFloat3("Position", position_xyz, "%.3f");
-        }
-        if (rotation_deg_xyz) {
-            ImGui::InputFloat3("Rotation (deg)", rotation_deg_xyz, "%.2f");
-        }
-        if (scale_xyz) {
-            ImGui::InputFloat3("Scale", scale_xyz, "%.3f");
-        }
-        if (!allow_transform) {
-            ImGui::EndDisabled();
-        }
-        ImGui::End();
-
-        if (!use_docking) {
-            ImGui::SetNextWindowPos(ImVec2(830, 220), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
-        }
-        ImGui::Begin("Environment");
-        if (hdr_path && hdr_path_capacity > 0) {
-            ImGui::InputText("Equirect HDR", hdr_path, (size_t)hdr_path_capacity);
-        }
-        if (ibl_path && ibl_path_capacity > 0) {
-            ImGui::InputText("IBL KTX", ibl_path, (size_t)ibl_path_capacity);
-        }
-        if (skybox_path && skybox_path_capacity > 0) {
-            ImGui::InputText("Skybox KTX", skybox_path, (size_t)skybox_path_capacity);
-        }
-        if (environment_intensity) {
-            ImGui::SliderFloat("Intensity", environment_intensity, 0.0f, 200000.0f, "%.1f");
-        }
-        if (environment_generate) {
-            *environment_generate = false;
-            if (ImGui::Button("Generate KTX")) {
-                *environment_generate = true;
+        ImGui::SetNextWindowPos(
+            ImVec2(work_pos.x + work_size.x - right_width - gutter, work_pos.y),
+            ImGuiCond_FirstUseEver
+        );
+        ImGui::SetNextWindowSize(ImVec2(right_width, work_size.y), ImGuiCond_FirstUseEver);
+        int current = selected_index ? *selected_index : -1;
+        const char* selected_name = "None";
+        if (current >= 0 && current < object_count && object_names) {
+            const char* name = object_names[current];
+            if (name) {
+                selected_name = name;
             }
         }
-        ImGui::SameLine();
-        if (environment_apply) {
-            *environment_apply = false;
-            if (ImGui::Button("Load Environment")) {
-                *environment_apply = true;
-            }
-        }
-        ImGui::End();
-
-        if (!use_docking) {
-            ImGui::SetNextWindowPos(ImVec2(12, 500), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
-        }
-        ImGui::Begin("Lighting");
-        if (light_color_rgb) {
-            ImGui::ColorEdit3("Color", light_color_rgb);
-        }
-        if (light_intensity) {
-            ImGui::SliderFloat("Intensity", light_intensity, 0.0f, 200000.0f, "%.1f");
-        }
-        if (light_dir_xyz) {
-            ImGui::InputFloat3("Direction", light_dir_xyz, "%.3f");
-            ImGui::SameLine();
-            if (ImGui::Button("Normalize")) {
-                float x = light_dir_xyz[0];
-                float y = light_dir_xyz[1];
-                float z = light_dir_xyz[2];
-                float len = std::sqrt(x * x + y * y + z * z);
-                if (len > 1e-6f) {
-                    light_dir_xyz[0] = x / len;
-                    light_dir_xyz[1] = y / len;
-                    light_dir_xyz[2] = z / len;
-                }
-            }
-        }
-        ImGui::End();
-
-        if (!use_docking) {
-            ImGui::SetNextWindowPos(ImVec2(390, 500), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(420, 220), ImGuiCond_FirstUseEver);
-        }
-        ImGui::Begin("Materials");
-        if (!material_names || material_count <= 0) {
-            ImGui::TextUnformatted("No materials loaded.");
-        } else {
-            int current = selected_material_index ? *selected_material_index : -1;
-            if (current < 0 || current >= material_count) {
-                current = -1;
-            }
-            for (int i = 0; i < material_count; ++i) {
-                const char* name = material_names[i] ? material_names[i] : "Material";
-                bool selected = (i == current);
-                if (ImGui::Selectable(name, selected)) {
-                    if (selected_material_index) {
-                        *selected_material_index = i;
-                    }
-                    current = i;
-                }
-            }
-        }
+        ImGui::Begin("Inspector");
+        ImGui::Text("Inspector - %s", selected_name);
         ImGui::Separator();
-        bool has_material = selected_material_index && *selected_material_index >= 0;
-        if (!has_material) {
-            ImGui::BeginDisabled();
+
+        bool show_transform = selected_kind && *selected_kind == 0;
+        if (show_transform && ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool has_selection = selected_index && *selected_index >= 0;
+            bool allow_transform = has_selection && (!can_edit_transform || *can_edit_transform);
+            if (!allow_transform) {
+                ImGui::BeginDisabled();
+            }
+            if (position_xyz) {
+                ImGui::InputFloat3("Position", position_xyz, "%.3f");
+            }
+            if (rotation_deg_xyz) {
+                ImGui::InputFloat3("Rotation (deg)", rotation_deg_xyz, "%.2f");
+            }
+            if (scale_xyz) {
+                ImGui::InputFloat3("Scale", scale_xyz, "%.3f");
+            }
+            if (!allow_transform) {
+                ImGui::EndDisabled();
+            }
         }
-        if (material_base_color_rgba) {
-            ImGui::ColorEdit4("Base Color", material_base_color_rgba);
+
+        bool show_lighting = selected_kind && *selected_kind == 1;
+        if (show_lighting && ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (light_color_rgb) {
+                ImGui::ColorEdit3("Color", light_color_rgb);
+            }
+            if (light_intensity) {
+                ImGui::SliderFloat("Intensity", light_intensity, 0.0f, 200000.0f, "%.1f");
+            }
+            if (light_dir_xyz) {
+                ImGui::InputFloat3("Direction", light_dir_xyz, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Normalize")) {
+                    float x = light_dir_xyz[0];
+                    float y = light_dir_xyz[1];
+                    float z = light_dir_xyz[2];
+                    float len = std::sqrt(x * x + y * y + z * z);
+                    if (len > 1e-6f) {
+                        light_dir_xyz[0] = x / len;
+                        light_dir_xyz[1] = y / len;
+                        light_dir_xyz[2] = z / len;
+                    }
+                }
+            }
         }
-        if (material_metallic) {
-            ImGui::SliderFloat("Metallic", material_metallic, 0.0f, 1.0f, "%.3f");
+
+        bool show_materials = selected_kind && *selected_kind == 0;
+        if (show_materials && ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!material_names || material_count <= 0) {
+                ImGui::TextUnformatted("No materials loaded.");
+            } else {
+                int current = selected_material_index ? *selected_material_index : -1;
+                if (current < 0 || current >= material_count) {
+                    current = -1;
+                }
+                for (int i = 0; i < material_count; ++i) {
+                    const char* name = material_names[i] ? material_names[i] : "Material";
+                    bool selected = (i == current);
+                    if (ImGui::Selectable(name, selected)) {
+                        if (selected_material_index) {
+                            *selected_material_index = i;
+                        }
+                        current = i;
+                    }
+                }
+            }
+            ImGui::Separator();
+            bool has_material = selected_material_index && *selected_material_index >= 0;
+            if (!has_material) {
+                ImGui::BeginDisabled();
+            }
+            if (material_base_color_rgba) {
+                ImGui::ColorEdit4("Base Color", material_base_color_rgba);
+            }
+            if (material_metallic) {
+                ImGui::SliderFloat("Metallic", material_metallic, 0.0f, 1.0f, "%.3f");
+            }
+            if (material_roughness) {
+                ImGui::SliderFloat("Roughness", material_roughness, 0.0f, 1.0f, "%.3f");
+            }
+            if (material_emissive_rgb) {
+                ImGui::ColorEdit3("Emissive", material_emissive_rgb);
+            }
+            if (!has_material) {
+                ImGui::EndDisabled();
+            }
         }
-        if (material_roughness) {
-            ImGui::SliderFloat("Roughness", material_roughness, 0.0f, 1.0f, "%.3f");
+
+        bool show_environment = selected_kind && *selected_kind == 2;
+        if (show_environment && ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (hdr_path && hdr_path_capacity > 0) {
+                ImGui::InputText("Equirect HDR", hdr_path, (size_t)hdr_path_capacity);
+            }
+            if (ibl_path && ibl_path_capacity > 0) {
+                ImGui::InputText("IBL KTX", ibl_path, (size_t)ibl_path_capacity);
+            }
+            if (skybox_path && skybox_path_capacity > 0) {
+                ImGui::InputText("Skybox KTX", skybox_path, (size_t)skybox_path_capacity);
+            }
+            if (environment_intensity) {
+                ImGui::SliderFloat("Intensity", environment_intensity, 0.0f, 200000.0f, "%.1f");
+            }
+            if (environment_generate) {
+                *environment_generate = false;
+                if (ImGui::Button("Generate KTX")) {
+                    *environment_generate = true;
+                }
+            }
+            ImGui::SameLine();
+            if (environment_apply) {
+                *environment_apply = false;
+                if (ImGui::Button("Load Environment")) {
+                    *environment_apply = true;
+                }
+            }
         }
-        if (material_emissive_rgb) {
-            ImGui::ColorEdit3("Emissive", material_emissive_rgb);
-        }
-        if (!has_material) {
-            ImGui::EndDisabled();
-        }
+
         ImGui::End();
     });
 }
@@ -2043,6 +1989,7 @@ extern "C" {
         object_names: *const *const c_char,
         object_count: i32,
         selected_index: *mut i32,
+        selected_kind: *mut i32,
         can_edit_transform: *mut bool,
         position_xyz: *mut f32,
         rotation_deg_xyz: *mut f32,

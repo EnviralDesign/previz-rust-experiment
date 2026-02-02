@@ -70,6 +70,7 @@ impl App {
         if let Some(entity) = render.light_entity() {
             self.scene.add_directional_light("Directional Light", entity);
         }
+        self.scene.set_environment_present(true);
 
         self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
         render.set_projection_for_window(window);
@@ -140,12 +141,18 @@ impl App {
         let mut rotation = [0.0f32; 3];
         let mut scale = [1.0f32; 3];
         let mut can_edit_transform = false;
+        let mut selected_kind = -1i32;
         if selected_index >= 0 {
             if let Some(object) = self.scene.objects().get(selected_index as usize) {
                 position = object.position;
                 rotation = object.rotation_deg;
                 scale = object.scale;
                 can_edit_transform = object.kind == SceneObjectKind::Asset;
+                selected_kind = match object.kind {
+                    SceneObjectKind::Asset => 0,
+                    SceneObjectKind::DirectionalLight => 1,
+                    SceneObjectKind::Environment => 2,
+                };
             }
         }
         let mut light_settings = self.ui.light_settings();
@@ -174,6 +181,7 @@ impl App {
                     &ui_text,
                     &object_names,
                     &mut selected_index,
+                    &mut selected_kind,
                     &mut can_edit_transform,
                     &mut position,
                     &mut rotation,
