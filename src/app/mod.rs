@@ -3,16 +3,19 @@ mod timing;
 
 use crate::assets::{AssetManager, DEFAULT_GLTF_PATH};
 use crate::render::{CameraController, CameraMovement, RenderContext};
-use crate::scene::{compose_transform_matrix, SceneObjectKind, SceneState};
+use crate::scene::{
+    compose_transform_matrix, AssetData, DirectionalLightData, EnvironmentData, SceneObject,
+    SceneObjectKind, SceneState,
+};
 use crate::ui::{MaterialParams, UiState};
 use input::{InputAction, InputState};
 use timing::FrameTiming;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -61,18 +64,9 @@ impl App {
 
     fn init_filament(&mut self, window: &Window) {
         let mut render = RenderContext::new(window);
-        let (engine, scene) = render.engine_scene_mut();
-        let mut entity_manager = engine.entity_manager();
-        let loaded =
-            self.assets
-                .load_gltf_from_path(engine, scene, &mut entity_manager, DEFAULT_GLTF_PATH);
-        self.scene.add_asset(&loaded);
-        if let Some(entity) = render.light_entity() {
-            self.scene.add_directional_light("Directional Light", entity);
-        }
-        self.scene.set_environment_present(true);
 
-        self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
+        // Start with empty scene - no default objects
+        self.camera = CameraController::new([0.0, 0.0, 5.0], 0.0, 0.0);
         render.set_projection_for_window(window);
         self.camera.apply(render.camera_mut());
         render.init_ui(window);
@@ -134,7 +128,9 @@ impl App {
             .assets
             .material_names()
             .iter()
-            .map(|name| CString::new(name.as_str()).unwrap_or_else(|_| CString::new("Material").unwrap()))
+            .map(|name| {
+                CString::new(name.as_str()).unwrap_or_else(|_| CString::new("Material").unwrap())
+            })
             .collect();
         let mut selected_index = self.ui.selected_index();
         let mut position = [0.0f32; 3];
@@ -142,20 +138,38 @@ impl App {
         let mut scale = [1.0f32; 3];
         let mut can_edit_transform = false;
         let mut selected_kind = -1i32;
+        let mut light_settings = self.ui.light_settings();
+        let mut environment_intensity = self.ui.environment_intensity();
+        let mut hdr_path_initial = String::new();
+        let mut ibl_path_initial = String::new();
+        let mut skybox_path_initial = String::new();
+
         if selected_index >= 0 {
             if let Some(object) = self.scene.objects().get(selected_index as usize) {
-                position = object.position;
-                rotation = object.rotation_deg;
-                scale = object.scale;
-                can_edit_transform = object.kind == SceneObjectKind::Asset;
-                selected_kind = match object.kind {
-                    SceneObjectKind::Asset => 0,
-                    SceneObjectKind::DirectionalLight => 1,
-                    SceneObjectKind::Environment => 2,
+                can_edit_transform = matches!(object.kind, SceneObjectKind::Asset(_));
+                selected_kind = match &object.kind {
+                    SceneObjectKind::Asset(data) => {
+                        position = data.position;
+                        rotation = data.rotation_deg;
+                        scale = data.scale;
+                        0
+                    }
+                    SceneObjectKind::DirectionalLight(data) => {
+                        light_settings.color = data.color;
+                        light_settings.intensity = data.intensity;
+                        light_settings.direction = data.direction;
+                        1
+                    }
+                    SceneObjectKind::Environment(data) => {
+                        environment_intensity = data.intensity;
+                        hdr_path_initial = data.hdr_path.clone();
+                        ibl_path_initial = data.ibl_path.clone();
+                        skybox_path_initial = data.skybox_path.clone();
+                        2
+                    }
                 };
             }
         }
-        let mut light_settings = self.ui.light_settings();
         let mut selected_material_index = self.ui.selected_material_index();
         let mut material_params = self.ui.material_params();
         let previous_material_selection = selected_material_index;
@@ -164,6 +178,11 @@ impl App {
         let mut environment_intensity = self.ui.environment_intensity();
         let mut environment_apply = false;
         let mut environment_generate = false;
+        let mut create_gltf = false;
+        let mut create_light = false;
+        let mut create_environment = false;
+        let mut save_scene = false;
+        let mut load_scene = false;
         let (hdr_path_string, ibl_path_string, skybox_path_string) = {
             let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
@@ -201,6 +220,11 @@ impl App {
                     &mut environment_intensity,
                     &mut environment_apply,
                     &mut environment_generate,
+                    &mut create_gltf,
+                    &mut create_light,
+                    &mut create_environment,
+                    &mut save_scene,
+                    &mut load_scene,
                     self.timing.frame_dt,
                 );
                 self.timing.set_render_ms(render_ms);
@@ -224,35 +248,53 @@ impl App {
                 light_settings.intensity,
                 light_settings.direction,
             );
-            if can_edit_transform && selected_index == previous_selection {
+
+            // Save edited data back to SceneObject
+            if selected_index == previous_selection && selected_index >= 0 {
                 if let Some(object) = self.scene.object_mut(selected_index as usize) {
-                    if object.kind == SceneObjectKind::Asset {
-                        let mut changed = false;
-                        if object.position != position {
-                            object.position = position;
-                            changed = true;
-                        }
-                        if object.rotation_deg != rotation {
-                            object.rotation_deg = rotation;
-                            changed = true;
-                        }
-                        if object.scale != scale {
-                            object.scale = scale;
-                            changed = true;
-                        }
-                        if changed {
-                            if let Some(entity) = object.root_entity {
-                                let matrix = compose_transform_matrix(
-                                    object.position,
-                                    object.rotation_deg,
-                                    object.scale,
-                                );
-                                render.set_entity_transform(entity, matrix);
+                    match &mut object.kind {
+                        SceneObjectKind::Asset(data) => {
+                            if can_edit_transform {
+                                let mut changed = false;
+                                if data.position != position {
+                                    data.position = position;
+                                    changed = true;
+                                }
+                                if data.rotation_deg != rotation {
+                                    data.rotation_deg = rotation;
+                                    changed = true;
+                                }
+                                if data.scale != scale {
+                                    data.scale = scale;
+                                    changed = true;
+                                }
+                                if changed {
+                                    if let Some(entity) = object.root_entity {
+                                        let matrix = compose_transform_matrix(
+                                            data.position,
+                                            data.rotation_deg,
+                                            data.scale,
+                                        );
+                                        render.set_entity_transform(entity, matrix);
+                                    }
+                                }
                             }
+                        }
+                        SceneObjectKind::DirectionalLight(data) => {
+                            data.color = light_settings.color;
+                            data.intensity = light_settings.intensity;
+                            data.direction = light_settings.direction;
+                        }
+                        SceneObjectKind::Environment(data) => {
+                            data.intensity = environment_intensity;
+                            data.hdr_path = hdr_path_string.clone();
+                            data.ibl_path = ibl_path_string.clone();
+                            data.skybox_path = skybox_path_string.clone();
                         }
                     }
                 }
             }
+
             if (environment_intensity - previous_environment_intensity).abs() > f32::EPSILON {
                 render.set_environment_intensity(environment_intensity);
             }
@@ -276,7 +318,8 @@ impl App {
             if environment_apply {
                 if ibl_path_string.is_empty() && skybox_path_string.is_empty() {
                     self.ui.set_environment_status(
-                        "Environment load failed: provide KTX paths or generate from HDR.".to_string(),
+                        "Environment load failed: provide KTX paths or generate from HDR."
+                            .to_string(),
                     );
                 } else {
                     let ok = render.set_environment(
@@ -285,7 +328,7 @@ impl App {
                         environment_intensity,
                     );
                     if ok {
-                        self.scene.set_environment_present(true);
+                        // TODO: Use set_environment with EnvironmentData
                         self.ui
                             .set_environment_status("Environment loaded.".to_string());
                     } else {
@@ -308,6 +351,92 @@ impl App {
                     load_material_params(&mut self.assets, selected_material_index)
                 {
                     self.ui.set_material_params(params);
+                }
+            }
+
+            // Handle Main Menu button actions
+            if create_gltf {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("glTF", &["gltf", "glb"])
+                    .pick_file()
+                {
+                    if let Some(path_str) = path.to_str() {
+                        // Add GLTF to existing scene (don't clear)
+                        let (engine, scene) = render.engine_scene_mut();
+                        let mut entity_manager = engine.entity_manager();
+                        let loaded = self.assets.load_gltf_from_path(
+                            engine,
+                            scene,
+                            &mut entity_manager,
+                            path_str,
+                        );
+                        self.scene.add_asset(&loaded, path_str);
+                        // Update camera to frame the new asset
+                        self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
+                        self.camera.apply(render.camera_mut());
+                    }
+                }
+            }
+
+            if create_light {
+                let (engine, scene) = render.engine_scene_mut();
+                let mut entity_manager = engine.entity_manager();
+                let light_entity = engine.create_directional_light(
+                    &mut entity_manager,
+                    [1.0, 1.0, 1.0],
+                    100_000.0,
+                    [0.0, -1.0, -0.5],
+                );
+                scene.add_entity(light_entity);
+                self.scene.add_directional_light(
+                    "Directional Light",
+                    light_entity,
+                    DirectionalLightData {
+                        color: [1.0, 1.0, 1.0],
+                        intensity: 100_000.0,
+                        direction: [0.0, -1.0, -0.5],
+                    },
+                );
+                render.set_light_entity(light_entity);
+            }
+
+            if create_environment {
+                self.scene.set_environment(EnvironmentData {
+                    hdr_path: String::new(),
+                    ibl_path: String::new(),
+                    skybox_path: String::new(),
+                    intensity: 30_000.0,
+                });
+            }
+
+            if save_scene {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Scene", &["json"])
+                    .set_file_name("scene.json")
+                    .save_file()
+                {
+                    if let Err(e) =
+                        crate::scene::serialization::save_scene_to_file(&self.scene, &path)
+                    {
+                        log::warn!("Failed to save scene: {}", e);
+                    }
+                }
+            }
+
+            if load_scene {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Scene", &["json"])
+                    .pick_file()
+                {
+                    match crate::scene::serialization::load_scene_from_file(&path) {
+                        Ok(loaded_scene) => {
+                            self.scene = loaded_scene;
+                            log::info!("Scene loaded from {:?}", path);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to load scene: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -533,7 +662,10 @@ impl App {
 }
 
 fn buffer_to_string(buffer: &[u8]) -> String {
-    let end = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    let end = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(buffer.len());
     String::from_utf8_lossy(&buffer[..end]).trim().to_string()
 }
 
@@ -585,10 +717,7 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
         .map_err(|err| format!("Failed to run cmgen: {}", err))?;
 
     if !status.success() {
-        return Err(format!(
-            "cmgen failed with status {:?}.",
-            status.code()
-        ));
+        return Err(format!("cmgen failed with status {:?}.", status.code()));
     }
 
     let output_dir = output_root.join(stem);
@@ -613,7 +742,10 @@ fn apply_material_changes(
     if previous_params == params {
         return;
     }
-    let Some(material_instance) = assets.material_instances_mut().get_mut(selected_index as usize) else {
+    let Some(material_instance) = assets
+        .material_instances_mut()
+        .get_mut(selected_index as usize)
+    else {
         return;
     };
 

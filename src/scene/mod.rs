@@ -1,33 +1,77 @@
+pub mod serialization;
+
 use crate::assets::LoadedAsset;
 use crate::filament::Entity;
 
-#[derive(Debug, Clone)]
-pub struct SceneObject {
-    pub name: String,
-    pub kind: SceneObjectKind,
-    pub center: [f32; 3],
-    pub extent: [f32; 3],
-    pub root_entity: Option<Entity>,
+/// Asset-specific data - matches what can be edited in UI
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssetData {
+    pub path: String,
     pub position: [f32; 3],
     pub rotation_deg: [f32; 3],
     pub scale: [f32; 3],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SceneObjectKind {
-    Asset,
-    DirectionalLight,
-    Environment,
+/// Directional light-specific data - matches what can be edited in UI
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DirectionalLightData {
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub direction: [f32; 3],
 }
 
-#[derive(Default)]
+/// Environment-specific data - matches what can be edited in UI
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentData {
+    pub hdr_path: String,
+    pub ibl_path: String,
+    pub skybox_path: String,
+    pub intensity: f32,
+}
+
+/// Runtime object in the scene - contains editable parameters + runtime entity reference
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SceneObject {
+    pub name: String,
+    pub kind: SceneObjectKind,
+    // Runtime entity reference (not serialized - regenerated on load)
+    #[serde(skip)]
+    pub root_entity: Option<Entity>,
+    // Bounding box (for assets, computed at load time)
+    #[serde(skip)]
+    pub center: [f32; 3],
+    #[serde(skip)]
+    pub extent: [f32; 3],
+}
+
+/// Type-specific editable data - this is what gets saved/loaded
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum SceneObjectKind {
+    Asset(AssetData),
+    DirectionalLight(DirectionalLightData),
+    Environment(EnvironmentData),
+}
+
+impl SceneObjectKind {
+    pub fn discriminant(&self) -> &'static str {
+        match self {
+            SceneObjectKind::Asset(_) => "Asset",
+            SceneObjectKind::DirectionalLight(_) => "DirectionalLight",
+            SceneObjectKind::Environment(_) => "Environment",
+        }
+    }
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct SceneState {
     objects: Vec<SceneObject>,
 }
 
 impl SceneState {
     pub fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
 
     pub fn objects(&self) -> &[SceneObject] {
@@ -35,60 +79,87 @@ impl SceneState {
     }
 
     pub fn object_names(&self) -> Vec<&str> {
-        self.objects.iter().map(|object| object.name.as_str()).collect()
+        self.objects
+            .iter()
+            .map(|object| object.name.as_str())
+            .collect()
     }
 
     pub fn object_mut(&mut self, index: usize) -> Option<&mut SceneObject> {
         self.objects.get_mut(index)
     }
 
-    pub fn add_asset(&mut self, asset: &LoadedAsset) {
+    pub fn add_asset(&mut self, asset: &LoadedAsset, path: &str) {
         self.objects.push(SceneObject {
             name: asset.name.clone(),
-            kind: SceneObjectKind::Asset,
-            center: asset.center,
-            extent: asset.extent,
-            root_entity: Some(asset.root_entity),
-            position: [0.0, 0.0, 0.0],
-            rotation_deg: [0.0, 0.0, 0.0],
-            scale: [1.0, 1.0, 1.0],
-        });
-    }
-
-    pub fn add_directional_light(&mut self, name: &str, entity: Entity) {
-        self.objects.push(SceneObject {
-            name: name.to_string(),
-            kind: SceneObjectKind::DirectionalLight,
-            center: [0.0, 0.0, 0.0],
-            extent: [0.0, 0.0, 0.0],
-            root_entity: Some(entity),
-            position: [0.0, 0.0, 0.0],
-            rotation_deg: [0.0, 0.0, 0.0],
-            scale: [1.0, 1.0, 1.0],
-        });
-    }
-
-    pub fn set_environment_present(&mut self, present: bool) {
-        let index = self
-            .objects
-            .iter()
-            .position(|object| object.kind == SceneObjectKind::Environment);
-        match (present, index) {
-            (true, None) => self.objects.push(SceneObject {
-                name: "Environment".to_string(),
-                kind: SceneObjectKind::Environment,
-                center: [0.0, 0.0, 0.0],
-                extent: [0.0, 0.0, 0.0],
-                root_entity: None,
+            kind: SceneObjectKind::Asset(AssetData {
+                path: path.to_string(),
                 position: [0.0, 0.0, 0.0],
                 rotation_deg: [0.0, 0.0, 0.0],
                 scale: [1.0, 1.0, 1.0],
             }),
-            (false, Some(idx)) => {
-                self.objects.remove(idx);
+            center: asset.center,
+            extent: asset.extent,
+            root_entity: Some(asset.root_entity),
+        });
+    }
+
+    pub fn add_directional_light(
+        &mut self,
+        name: &str,
+        entity: Entity,
+        data: DirectionalLightData,
+    ) {
+        self.objects.push(SceneObject {
+            name: name.to_string(),
+            kind: SceneObjectKind::DirectionalLight(data),
+            center: [0.0, 0.0, 0.0],
+            extent: [0.0, 0.0, 0.0],
+            root_entity: Some(entity),
+        });
+    }
+
+    pub fn set_environment(&mut self, data: EnvironmentData) {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| matches!(object.kind, SceneObjectKind::Environment(_)));
+        match index {
+            Some(idx) => {
+                // Update existing environment
+                if let SceneObjectKind::Environment(existing) = &mut self.objects[idx].kind {
+                    *existing = data;
+                }
             }
-            _ => {}
+            None => {
+                // Add new environment
+                self.objects.push(SceneObject {
+                    name: "Environment".to_string(),
+                    kind: SceneObjectKind::Environment(data),
+                    center: [0.0, 0.0, 0.0],
+                    extent: [0.0, 0.0, 0.0],
+                    root_entity: None,
+                });
+            }
         }
+    }
+
+    pub fn remove_environment(&mut self) {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| matches!(object.kind, SceneObjectKind::Environment(_)));
+        if let Some(idx) = index {
+            self.objects.remove(idx);
+        }
+    }
+
+    pub fn add_object(&mut self, object: SceneObject) {
+        self.objects.push(object);
+    }
+
+    pub fn clear(&mut self) {
+        self.objects.clear();
     }
 }
 
@@ -119,9 +190,21 @@ pub fn compose_transform_matrix(
 
     let (sx, sy, sz) = (scale[0], scale[1], scale[2]);
     [
-        r00 * sx, r10 * sx, r20 * sx, 0.0,
-        r01 * sy, r11 * sy, r21 * sy, 0.0,
-        r02 * sz, r12 * sz, r22 * sz, 0.0,
-        position[0], position[1], position[2], 1.0,
+        r00 * sx,
+        r10 * sx,
+        r20 * sx,
+        0.0,
+        r01 * sy,
+        r11 * sy,
+        r21 * sy,
+        0.0,
+        r02 * sz,
+        r12 * sz,
+        r22 * sz,
+        0.0,
+        position[0],
+        position[1],
+        position[2],
+        1.0,
     ]
 }

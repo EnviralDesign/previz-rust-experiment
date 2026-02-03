@@ -115,7 +115,7 @@ impl Engine {
                 native_window,
                 0, // flags
             );
-            NonNull::new(ptr as *mut c_void).map(|ptr| SwapChain { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| SwapChain {
                 ptr,
                 engine: self.ptr,
             })
@@ -126,7 +126,7 @@ impl Engine {
     pub fn create_renderer(&mut self) -> Option<Renderer> {
         unsafe {
             let ptr = ffi::filament_engine_create_renderer(self.ptr.as_ptr() as *mut _);
-            NonNull::new(ptr as *mut c_void).map(|ptr| Renderer { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| Renderer {
                 ptr,
                 engine: self.ptr,
             })
@@ -137,7 +137,7 @@ impl Engine {
     pub fn create_scene(&mut self) -> Option<Scene> {
         unsafe {
             let ptr = ffi::filament_engine_create_scene(self.ptr.as_ptr() as *mut _);
-            NonNull::new(ptr as *mut c_void).map(|ptr| Scene { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| Scene {
                 ptr,
                 engine: self.ptr,
             })
@@ -148,7 +148,7 @@ impl Engine {
     pub fn create_view(&mut self) -> Option<View> {
         unsafe {
             let ptr = ffi::filament_engine_create_view(self.ptr.as_ptr() as *mut _);
-            NonNull::new(ptr as *mut c_void).map(|ptr| View { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| View {
                 ptr,
                 engine: self.ptr,
             })
@@ -158,11 +158,8 @@ impl Engine {
     /// Create a camera
     pub fn create_camera(&mut self, entity: Entity) -> Option<Camera> {
         unsafe {
-            let ptr = ffi::filament_engine_create_camera(
-                self.ptr.as_ptr() as *mut _,
-                entity.id,
-            );
-            NonNull::new(ptr as *mut c_void).map(|ptr| Camera { 
+            let ptr = ffi::filament_engine_create_camera(self.ptr.as_ptr() as *mut _, entity.id);
+            NonNull::new(ptr as *mut c_void).map(|ptr| Camera {
                 ptr,
                 engine: self.ptr,
             })
@@ -173,7 +170,7 @@ impl Engine {
     pub fn entity_manager(&mut self) -> EntityManager {
         unsafe {
             let ptr = ffi::filament_engine_get_entity_manager(self.ptr.as_ptr() as *mut _);
-            EntityManager { 
+            EntityManager {
                 ptr: NonNull::new(ptr as *mut c_void).expect("EntityManager is null"),
             }
         }
@@ -294,7 +291,8 @@ impl Engine {
                 package.as_ptr() as *const c_void,
                 package.len(),
             );
-            let material = ffi::filament_material_builder_build(builder, self.ptr.as_ptr() as *mut _);
+            let material =
+                ffi::filament_material_builder_build(builder, self.ptr.as_ptr() as *mut _);
             ffi::filament_material_builder_destroy(builder);
             NonNull::new(material as *mut c_void).map(|ptr| Material { ptr })
         }
@@ -405,19 +403,27 @@ impl Renderer {
     /// Render a view
     pub fn render(&mut self, view: &View) {
         unsafe {
-            ffi::filament_renderer_render(
-                self.ptr.as_ptr() as *mut _,
-                view.ptr.as_ptr() as *mut _,
-            );
+            ffi::filament_renderer_render(self.ptr.as_ptr() as *mut _, view.ptr.as_ptr() as *mut _);
         }
     }
 
     /// Set clear color and options
-    pub fn set_clear_options(&mut self, r: f32, g: f32, b: f32, a: f32, clear: bool, discard: bool) {
+    pub fn set_clear_options(
+        &mut self,
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+        clear: bool,
+        discard: bool,
+    ) {
         unsafe {
             ffi::filament_renderer_set_clear_options(
                 self.ptr.as_ptr() as *mut _,
-                r, g, b, a,
+                r,
+                g,
+                b,
+                a,
                 clear,
                 discard,
             );
@@ -558,10 +564,7 @@ impl View {
     /// Set the scene to render
     pub fn set_scene(&mut self, scene: &mut Scene) {
         unsafe {
-            ffi::filament_view_set_scene(
-                self.ptr.as_ptr() as *mut _,
-                scene.ptr.as_ptr() as *mut _,
-            );
+            ffi::filament_view_set_scene(self.ptr.as_ptr() as *mut _, scene.ptr.as_ptr() as *mut _);
         }
     }
 
@@ -591,10 +594,7 @@ impl View {
     /// Enable or disable post-processing
     pub fn set_post_processing_enabled(&mut self, enabled: bool) {
         unsafe {
-            ffi::filament_view_set_post_processing_enabled(
-                self.ptr.as_ptr() as *mut _,
-                enabled,
-            );
+            ffi::filament_view_set_post_processing_enabled(self.ptr.as_ptr() as *mut _, enabled);
         }
     }
 }
@@ -618,21 +618,43 @@ pub struct Camera {
 
 impl Camera {
     /// Set orthographic projection
-    pub fn set_projection_ortho(&mut self, left: f64, right: f64, bottom: f64, top: f64, near: f64, far: f64) {
+    pub fn set_projection_ortho(
+        &mut self,
+        left: f64,
+        right: f64,
+        bottom: f64,
+        top: f64,
+        near: f64,
+        far: f64,
+    ) {
         unsafe {
             ffi::filament_camera_set_projection_ortho(
                 self.ptr.as_ptr() as *mut _,
-                left, right, bottom, top, near, far,
+                left,
+                right,
+                bottom,
+                top,
+                near,
+                far,
             );
         }
     }
 
     /// Set perspective projection
-    pub fn set_projection_perspective(&mut self, fov_degrees: f64, aspect: f64, near: f64, far: f64) {
+    pub fn set_projection_perspective(
+        &mut self,
+        fov_degrees: f64,
+        aspect: f64,
+        near: f64,
+        far: f64,
+    ) {
         unsafe {
             ffi::filament_camera_set_projection_perspective(
                 self.ptr.as_ptr() as *mut _,
-                fov_degrees, aspect, near, far,
+                fov_degrees,
+                aspect,
+                near,
+                far,
             );
         }
     }
@@ -642,9 +664,15 @@ impl Camera {
         unsafe {
             ffi::filament_camera_look_at(
                 self.ptr.as_ptr() as *mut _,
-                eye[0], eye[1], eye[2],
-                center[0], center[1], center[2],
-                up[0], up[1], up[2],
+                eye[0],
+                eye[1],
+                eye[2],
+                center[0],
+                center[1],
+                center[2],
+                up[0],
+                up[1],
+                up[2],
             );
         }
     }
@@ -663,7 +691,7 @@ impl Drop for Camera {
 
 /// Entity identifier
 /// Entity identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Entity {
     pub id: i32,
 }
@@ -717,7 +745,7 @@ impl Material {
     pub fn default_instance(&mut self) -> Option<MaterialInstance> {
         unsafe {
             let ptr = ffi::filament_material_get_default_instance(self.ptr.as_ptr() as *mut _);
-            NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance {
                 ptr,
                 owned: false, // Default instance is not owned
             })
@@ -728,10 +756,7 @@ impl Material {
     pub fn create_instance(&mut self) -> Option<MaterialInstance> {
         unsafe {
             let ptr = ffi::filament_material_create_instance(self.ptr.as_ptr() as *mut _);
-            NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance { 
-                ptr,
-                owned: true,
-            })
+            NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance { ptr, owned: true })
         }
     }
 }
@@ -816,7 +841,11 @@ impl MaterialInstance {
                 &mut value as *mut f32,
             )
         };
-        if ok { Some(value) } else { None }
+        if ok {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     pub fn get_float3(&self, name: &str) -> Option<[f32; 3]> {
@@ -829,7 +858,11 @@ impl MaterialInstance {
                 value.as_mut_ptr(),
             )
         };
-        if ok { Some(value) } else { None }
+        if ok {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     pub fn get_float4(&self, name: &str) -> Option<[f32; 4]> {
@@ -842,7 +875,11 @@ impl MaterialInstance {
                 value.as_mut_ptr(),
             )
         };
-        if ok { Some(value) } else { None }
+        if ok {
+            Some(value)
+        } else {
+            None
+        }
     }
 }
 
@@ -883,9 +920,8 @@ pub struct GltfTextureProvider {
 impl GltfTextureProvider {
     pub fn create_stb(engine: &mut Engine) -> Option<Self> {
         unsafe {
-            let ptr = ffi::filament_gltfio_create_stb_texture_provider(
-                engine.ptr.as_ptr() as *mut _,
-            );
+            let ptr =
+                ffi::filament_gltfio_create_stb_texture_provider(engine.ptr.as_ptr() as *mut _);
             NonNull::new(ptr as *mut c_void).map(|ptr| GltfTextureProvider { ptr })
         }
     }
@@ -1043,7 +1079,8 @@ impl GltfAsset {
     pub fn material_instances(&mut self) -> (Vec<MaterialInstance>, Vec<String>) {
         let mut instances = Vec::new();
         let mut names = Vec::new();
-        let instance_ptr = unsafe { ffi::filament_gltfio_asset_get_instance(self.ptr.as_ptr() as *mut _) };
+        let instance_ptr =
+            unsafe { ffi::filament_gltfio_asset_get_instance(self.ptr.as_ptr() as *mut _) };
         let Some(instance) = NonNull::new(instance_ptr as *mut c_void) else {
             return (instances, names);
         };
@@ -1058,7 +1095,10 @@ impl GltfAsset {
                 )
             };
             if let Some(mi) = NonNull::new(mi_ptr as *mut c_void) {
-                let material = MaterialInstance { ptr: mi, owned: false };
+                let material = MaterialInstance {
+                    ptr: mi,
+                    owned: false,
+                };
                 names.push(material.name());
                 instances.push(material);
             }
@@ -1179,6 +1219,11 @@ impl ImGuiHelper {
         environment_intensity: &mut f32,
         environment_apply: &mut bool,
         environment_generate: &mut bool,
+        create_gltf: &mut bool,
+        create_light: &mut bool,
+        create_environment: &mut bool,
+        save_scene: &mut bool,
+        load_scene: &mut bool,
     ) {
         let c_title = CString::new(assets_title).expect("Invalid title");
         let c_body = CString::new(assets_body).expect("Invalid body");
@@ -1225,6 +1270,11 @@ impl ImGuiHelper {
                 environment_intensity as *mut f32,
                 environment_apply as *mut bool,
                 environment_generate as *mut bool,
+                create_gltf as *mut bool,
+                create_light as *mut bool,
+                create_environment as *mut bool,
+                save_scene as *mut bool,
+                load_scene as *mut bool,
             );
         }
     }
@@ -1243,7 +1293,11 @@ impl ImGuiHelper {
 
     pub fn add_mouse_wheel(&mut self, wheel_x: f32, wheel_y: f32) {
         unsafe {
-            ffi::filagui_imgui_helper_add_mouse_wheel(self.ptr.as_ptr() as *mut _, wheel_x, wheel_y);
+            ffi::filagui_imgui_helper_add_mouse_wheel(
+                self.ptr.as_ptr() as *mut _,
+                wheel_x,
+                wheel_y,
+            );
         }
     }
 
@@ -1327,12 +1381,10 @@ impl VertexBufferBuilder {
 
     pub fn build(self) -> Option<VertexBuffer> {
         unsafe {
-            let ptr = ffi::filament_vertex_buffer_builder_build(
-                self.ptr,
-                self.engine.as_ptr() as *mut _,
-            );
+            let ptr =
+                ffi::filament_vertex_buffer_builder_build(self.ptr, self.engine.as_ptr() as *mut _);
             ffi::filament_vertex_buffer_builder_destroy(self.ptr);
-            NonNull::new(ptr as *mut c_void).map(|ptr| VertexBuffer { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| VertexBuffer {
                 ptr,
                 engine: self.engine,
             })
@@ -1389,12 +1441,10 @@ impl IndexBufferBuilder {
 
     pub fn build(self) -> Option<IndexBuffer> {
         unsafe {
-            let ptr = ffi::filament_index_buffer_builder_build(
-                self.ptr,
-                self.engine.as_ptr() as *mut _,
-            );
+            let ptr =
+                ffi::filament_index_buffer_builder_build(self.ptr, self.engine.as_ptr() as *mut _);
             ffi::filament_index_buffer_builder_destroy(self.ptr);
-            NonNull::new(ptr as *mut c_void).map(|ptr| IndexBuffer { 
+            NonNull::new(ptr as *mut c_void).map(|ptr| IndexBuffer {
                 ptr,
                 engine: self.engine,
             })
@@ -1438,8 +1488,12 @@ impl RenderableBuilder {
         unsafe {
             ffi::filament_renderable_builder_bounding_box(
                 self.ptr,
-                center[0], center[1], center[2],
-                half_extent[0], half_extent[1], half_extent[2],
+                center[0],
+                center[1],
+                center[2],
+                half_extent[0],
+                half_extent[1],
+                half_extent[2],
             );
         }
         self

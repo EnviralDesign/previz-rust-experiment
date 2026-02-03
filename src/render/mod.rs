@@ -3,11 +3,11 @@ mod camera;
 pub use camera::{CameraController, CameraMovement};
 
 use crate::filament::{
-    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox, SwapChain,
-    Texture, View,
+    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox,
+    SwapChain, Texture, View,
 };
-use std::ffi::CString;
 use std::ffi::c_void;
+use std::ffi::CString;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -55,13 +55,7 @@ impl RenderContext {
         view.set_scene(&mut scene);
         view.set_camera(&mut camera);
 
-        let light_entity = engine.create_directional_light(
-            &mut entity_manager,
-            [1.0, 1.0, 1.0],
-            100_000.0,
-            [0.0, -1.0, -0.5],
-        );
-        scene.add_entity(light_entity);
+        // No lights created at startup - user adds them via UI
 
         Self {
             engine,
@@ -72,7 +66,7 @@ impl RenderContext {
             ui_helper: None,
             scene,
             camera,
-            light_entity: Some(light_entity),
+            light_entity: None,
             indirect_light: None,
             indirect_light_texture: None,
             skybox: None,
@@ -93,7 +87,8 @@ impl RenderContext {
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
-        self.view.set_viewport(0, 0, new_size.width, new_size.height);
+        self.view
+            .set_viewport(0, 0, new_size.width, new_size.height);
         let aspect = new_size.width as f64 / new_size.height as f64;
         self.camera
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
@@ -121,17 +116,10 @@ impl RenderContext {
     pub fn init_ui(&mut self, window: &Window) {
         let mut ui_view = self.engine.create_view().expect("Failed to create UI view");
         ui_view.set_viewport(0, 0, window.inner_size().width, window.inner_size().height);
-        let mut helper =
-            ImGuiHelper::create(&mut self.engine, &mut ui_view, None)
-                .expect("Failed to create ImGui helper");
+        let mut helper = ImGuiHelper::create(&mut self.engine, &mut ui_view, None)
+            .expect("Failed to create ImGui helper");
         let size = window.inner_size();
-        helper.set_display_size(
-            size.width as i32,
-            size.height as i32,
-            1.0,
-            1.0,
-            false,
-        );
+        helper.set_display_size(size.width as i32, size.height as i32, 1.0, 1.0, false);
         self.ui_view = Some(ui_view);
         self.ui_helper = Some(helper);
     }
@@ -207,6 +195,11 @@ impl RenderContext {
         environment_intensity: &mut f32,
         environment_apply: &mut bool,
         environment_generate: &mut bool,
+        create_gltf: &mut bool,
+        create_light: &mut bool,
+        create_environment: &mut bool,
+        save_scene: &mut bool,
+        load_scene: &mut bool,
         delta_seconds: f32,
     ) -> f32 {
         let frame_start = std::time::Instant::now();
@@ -241,6 +234,11 @@ impl RenderContext {
                 environment_intensity,
                 environment_apply,
                 environment_generate,
+                create_gltf,
+                create_light,
+                create_environment,
+                save_scene,
+                load_scene,
             );
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {
@@ -257,16 +255,15 @@ impl RenderContext {
             * 1000.0
     }
 
-    pub fn set_directional_light(
-        &mut self,
-        color: [f32; 3],
-        intensity: f32,
-        direction: [f32; 3],
-    ) {
+    pub fn set_directional_light(&mut self, color: [f32; 3], intensity: f32, direction: [f32; 3]) {
         if let Some(entity) = self.light_entity {
             self.engine
                 .set_directional_light(entity, color, intensity, direction);
         }
+    }
+
+    pub fn set_light_entity(&mut self, entity: Entity) {
+        self.light_entity = Some(entity);
     }
 
     pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) {
@@ -274,12 +271,7 @@ impl RenderContext {
         tm.set_transform(entity, &matrix4x4);
     }
 
-    pub fn set_environment(
-        &mut self,
-        ibl_path: &str,
-        skybox_path: &str,
-        intensity: f32,
-    ) -> bool {
+    pub fn set_environment(&mut self, ibl_path: &str, skybox_path: &str, intensity: f32) -> bool {
         if ibl_path.is_empty() && skybox_path.is_empty() {
             return false;
         }
@@ -292,8 +284,9 @@ impl RenderContext {
         self.skybox_texture = None;
 
         if !ibl_path.is_empty() {
-            if let Some((light, texture)) =
-                self.engine.create_indirect_light_from_ktx(ibl_path, intensity)
+            if let Some((light, texture)) = self
+                .engine
+                .create_indirect_light_from_ktx(ibl_path, intensity)
             {
                 self.scene.set_indirect_light(Some(&light));
                 self.indirect_light = Some(light);
@@ -320,6 +313,25 @@ impl RenderContext {
         if let Some(light) = &mut self.indirect_light {
             light.set_intensity(intensity);
         }
+    }
+
+    pub fn clear_scene(&mut self) {
+        // Remove all entities from the Filament scene except camera
+        // Note: In a full implementation, we'd track all entities and remove them properly
+        // For now, we create a fresh scene
+        self.scene = self.engine.create_scene().expect("Failed to create scene");
+        self.view.set_scene(&mut self.scene);
+
+        // Reset environment
+        self.scene.set_indirect_light(None);
+        self.scene.set_skybox(None);
+        self.indirect_light = None;
+        self.indirect_light_texture = None;
+        self.skybox = None;
+        self.skybox_texture = None;
+
+        // Reset light entity reference (it will be recreated if needed)
+        self.light_entity = None;
     }
 }
 

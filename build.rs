@@ -31,13 +31,16 @@ fn filament_download_url() -> String {
 
 /// Download a file from URL to destination
 fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:warning=Downloading Filament v{} (~700MB, this may take a while)...", FILAMENT_VERSION);
-    
+    println!(
+        "cargo:warning=Downloading Filament v{} (~700MB, this may take a while)...",
+        FILAMENT_VERSION
+    );
+
     let response = ureq::get(url).call()?;
     let mut file = File::create(dest)?;
     let mut reader = response.into_reader();
     std::io::copy(&mut reader, &mut file)?;
-    
+
     println!("cargo:warning=Download complete!");
     Ok(())
 }
@@ -45,14 +48,14 @@ fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error
 /// Extract a .tgz file to destination directory
 fn extract_tgz(archive_path: &Path, dest_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:warning=Extracting Filament archive...");
-    
+
     let file = File::open(archive_path)?;
     let reader = BufReader::new(file);
     let decoder = GzDecoder::new(reader);
     let mut archive = Archive::new(decoder);
-    
+
     archive.unpack(dest_dir)?;
-    
+
     println!("cargo:warning=Extraction complete!");
     Ok(())
 }
@@ -71,30 +74,29 @@ fn get_filament_dir() -> PathBuf {
         );
     }
     let archive_path = out_dir.join(format!("filament-v{}-windows.tgz", FILAMENT_VERSION));
-    
+
     // Check if already extracted (files extract directly to out_dir)
     if out_dir.join("include").exists() && out_dir.join("lib").exists() {
         println!("cargo:warning=Using cached Filament at {:?}", out_dir);
         return out_dir;
     }
-    
+
     // Download if archive doesn't exist
     if !archive_path.exists() {
         download_file(&filament_download_url(), &archive_path)
             .expect("Failed to download Filament");
     }
-    
+
     // Extract archive - files go directly into out_dir
-    extract_tgz(&archive_path, &out_dir)
-        .expect("Failed to extract Filament");
-    
+    extract_tgz(&archive_path, &out_dir).expect("Failed to extract Filament");
+
     out_dir
 }
 
 /// Create the C++ bindings wrapper
 fn create_bindings_cpp(_filament_dir: &Path, out_dir: &Path) -> PathBuf {
     let bindings_cpp = out_dir.join("bindings.cpp");
-    
+
     // This is a minimal wrapper that exposes Filament's C++ API through C-style functions
     // We only include what we need for the hello world demo
     let cpp_content = r#"
@@ -1197,7 +1199,12 @@ void filagui_imgui_helper_render_scene_ui(
     int skybox_path_capacity,
     float* environment_intensity,
     bool* environment_apply,
-    bool* environment_generate
+    bool* environment_generate,
+    bool* create_gltf,
+    bool* create_light,
+    bool* create_environment,
+    bool* save_scene,
+    bool* load_scene
 ) {
     if (!helper) {
         return;
@@ -1210,27 +1217,78 @@ void filagui_imgui_helper_render_scene_ui(
         float right_width = work_size.x * 0.30f;
         float gutter = 12.0f;
 
+        // Left sidebar - single window with Main Menu and Hierarchy as groups
         ImGui::SetNextWindowPos(work_pos, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(left_width, work_size.y), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Hierarchy");
-        if (!object_names || object_count <= 0) {
-            ImGui::TextUnformatted("No objects loaded.");
-        } else {
-            int current = selected_index ? *selected_index : -1;
-            if (current < 0 || current >= object_count) {
-                current = -1;
+        ImGui::Begin("Scene");
+
+        // Main Menu group
+        if (ImGui::CollapsingHeader("Main Menu", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (create_gltf) {
+                *create_gltf = false;
+                if (ImGui::Button("Load GLTF...", ImVec2(-1, 0))) {
+                    *create_gltf = true;
+                }
             }
+            if (create_light) {
+                *create_light = false;
+                if (ImGui::Button("Add Light", ImVec2(-1, 0))) {
+                    *create_light = true;
+                }
+            }
+            if (create_environment) {
+                *create_environment = false;
+                if (ImGui::Button("Add Environment", ImVec2(-1, 0))) {
+                    *create_environment = true;
+                }
+            }
+            ImGui::Separator();
+            if (save_scene) {
+                *save_scene = false;
+                if (ImGui::Button("Save Scene...", ImVec2(-1, 0))) {
+                    *save_scene = true;
+                }
+            }
+            if (load_scene) {
+                *load_scene = false;
+                if (ImGui::Button("Load Scene...", ImVec2(-1, 0))) {
+                    *load_scene = true;
+                }
+            }
+        }
+
+        // Hierarchy group - takes remaining space
+        if (ImGui::CollapsingHeader("Hierarchy", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!object_names || object_count <= 0) {
+                ImGui::TextUnformatted("No objects loaded.");
+            } else {
+                int current = selected_index ? *selected_index : -1;
+                if (current < 0 || current >= object_count) {
+                    current = -1;
+                }
             for (int i = 0; i < object_count; ++i) {
                 const char* name = object_names[i] ? object_names[i] : "Object";
                 bool selected = (i == current);
+                ImGui::PushID(i);  // Ensure unique ID for each item
                 if (ImGui::Selectable(name, selected)) {
                     if (selected_index) {
                         *selected_index = i;
                     }
                     current = i;
                 }
+                ImGui::PopID();
+            }
+                // Deselect when clicking in empty space below the list
+                if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) &&
+                    ImGui::IsMouseClicked(0) &&
+                    !ImGui::IsAnyItemHovered()) {
+                    if (selected_index) {
+                        *selected_index = -1;
+                    }
+                }
             }
         }
+
         ImGui::End();
 
         ImGui::SetNextWindowPos(
@@ -1375,8 +1433,9 @@ void filagui_imgui_helper_render_scene_ui(
 "#;
 
     let mut file = File::create(&bindings_cpp).expect("Failed to create bindings.cpp");
-    file.write_all(cpp_content.as_bytes()).expect("Failed to write bindings.cpp");
-    
+    file.write_all(cpp_content.as_bytes())
+        .expect("Failed to write bindings.cpp");
+
     bindings_cpp
 }
 
@@ -2013,9 +2072,15 @@ extern "C" {
         environment_intensity: *mut f32,
         environment_apply: *mut bool,
         environment_generate: *mut bool,
+        create_gltf: *mut bool,
+        create_light: *mut bool,
+        create_environment: *mut bool,
+        save_scene: *mut bool,
+        load_scene: *mut bool,
     );
 }
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn main() {
@@ -2032,14 +2097,14 @@ fn main() {
             filament_src_dir
         );
     }
-    
+
     // Step 1: Get Filament (download if needed)
     let filament_dir = get_filament_dir();
     let include_dir = filament_dir.join("include");
     // lib/x86_64/md = dynamic CRT (MD), lib/x86_64/mt = static CRT (MT)
     // We use MD since that's the default for Rust debug builds
     let lib_dir = filament_dir.join("lib").join("x86_64").join("md");
-    
+
     // Verify directories exist
     if !include_dir.exists() {
         panic!("Filament include directory not found at {:?}", include_dir);
@@ -2047,15 +2112,18 @@ fn main() {
     if !lib_dir.exists() {
         panic!("Filament lib directory not found at {:?}", lib_dir);
     }
-    
+
     println!("cargo:warning=Using Filament from {:?}", filament_dir);
-    
+
     // Step 2: Create C++ bindings wrapper
     let bindings_cpp = create_bindings_cpp(&filament_dir, &out_dir);
-    
+
     // Step 3: Compile C++ bindings wrapper
     println!("cargo:warning=Compiling C++ bindings...");
-    let filagui_include_dir = filament_src_dir.join("libs").join("filagui").join("include");
+    let filagui_include_dir = filament_src_dir
+        .join("libs")
+        .join("filagui")
+        .join("include");
     let imgui_dir = filament_src_dir.join("third_party").join("imgui");
     cc::Build::new()
         .cpp(true)
@@ -2064,19 +2132,18 @@ fn main() {
         .include(&filagui_include_dir)
         .include(&imgui_dir)
         .flag("/std:c++20") // Filament uses designated initializers which require C++20
-        .flag("/EHsc")     // Exception handling
-        .flag("/MD")       // Dynamic CRT - must match Filament's "md" libraries
+        .flag("/EHsc") // Exception handling
+        .flag("/MD") // Dynamic CRT - must match Filament's "md" libraries
         .warnings(false)
         .compile("filament_bindings");
-    
+
     // Step 4: Generate Rust bindings manually
     // We skip bindgen because Filament's C++ headers contain complex templates
     // that bindgen can't handle. Since our API is fixed and well-defined,
     // we write the FFI bindings manually.
     println!("cargo:warning=Writing Rust bindings...");
     let bindings_rs = out_dir.join("bindings.rs");
-    fs::write(&bindings_rs, generate_rust_bindings())
-        .expect("Couldn't write bindings!");
+    fs::write(&bindings_rs, generate_rust_bindings()).expect("Couldn't write bindings!");
 
     // Step 4.5: Compile material with matching Filament version
     let material_out = compile_material(&filament_dir, &out_dir);
@@ -2110,24 +2177,24 @@ fn main() {
         .flag("/MD")
         .warnings(false)
         .compile("filagui_bindings");
-    
+
     // Step 5: Link Filament libraries
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!(
         "cargo:rustc-env=FILAMENT_BIN_DIR={}",
         filament_dir.join("bin").display()
     );
-    
+
     // Core Filament libraries (order matters for static linking)
     // The libraries listed here are the ones required for a basic rendering setup
     let filament_libs = [
         "filament",
         "backend",
-        "bluegl",        // OpenGL backend
-        "bluevk",        // Vulkan backend
+        "bluegl", // OpenGL backend
+        "bluevk", // Vulkan backend
         "filabridge",
         "filaflat",
-        "filamat",       // Material system (includes MaterialParser)
+        "filamat", // Material system (includes MaterialParser)
         "gltfio",
         "gltfio_core",
         "geometry",
@@ -2140,18 +2207,18 @@ fn main() {
         "meshoptimizer",
         "utils",
         "smol-v",
-        "shaders",       // Shader management
-        "uberzlib",      // Compression
-        "uberarchive",   // Archive support
-        "zstd",          // Compression
-        "matdbg",        // Material debug
+        "shaders",     // Shader management
+        "uberzlib",    // Compression
+        "uberarchive", // Archive support
+        "zstd",        // Compression
+        "matdbg",      // Material debug
     ];
-    
+
     for lib in &filament_libs {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
     println!("cargo:rustc-link-lib=static=filagui_bindings");
-    
+
     // System libraries required on Windows
     println!("cargo:rustc-link-lib=gdi32");
     println!("cargo:rustc-link-lib=user32");
@@ -2159,7 +2226,7 @@ fn main() {
     println!("cargo:rustc-link-lib=shlwapi");
     println!("cargo:rustc-link-lib=advapi32");
     println!("cargo:rustc-link-lib=shell32");
-    
+
     // Rebuild if bindings.cpp changes
     println!("cargo:rerun-if-changed=build.rs");
     println!(

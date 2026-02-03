@@ -33,8 +33,9 @@ impl InputState {
             PhysicalKey::Code(KeyCode::KeyA) => self.move_left = pressed,
             PhysicalKey::Code(KeyCode::KeyD) => self.move_right = pressed,
             PhysicalKey::Code(KeyCode::Space) => self.move_up = pressed,
-            PhysicalKey::Code(KeyCode::ControlLeft)
-            | PhysicalKey::Code(KeyCode::ControlRight) => self.move_down = pressed,
+            PhysicalKey::Code(KeyCode::ControlLeft) | PhysicalKey::Code(KeyCode::ControlRight) => {
+                self.move_down = pressed
+            }
             PhysicalKey::Code(KeyCode::Equal) => {
                 if pressed {
                     return InputAction::ZoomIn;

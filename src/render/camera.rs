@@ -52,7 +52,11 @@ impl CameraController {
         self.pitch = pitch;
 
         let cos_pitch = pitch.cos();
-        let dir = [self.yaw.cos() * cos_pitch, pitch.sin(), self.yaw.sin() * cos_pitch];
+        let dir = [
+            self.yaw.cos() * cos_pitch,
+            pitch.sin(),
+            self.yaw.sin() * cos_pitch,
+        ];
         let eye = self.position;
         let center = [eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2]];
         camera.look_at(eye, center, [0.0, 1.0, 0.0]);

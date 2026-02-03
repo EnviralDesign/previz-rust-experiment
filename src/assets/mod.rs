@@ -15,11 +15,8 @@ pub struct LoadedAsset {
 }
 
 pub struct AssetManager {
-    gltf_asset: Option<GltfAsset>,
-    gltf_asset_loader: Option<GltfAssetLoader>,
-    gltf_resource_loader: Option<GltfResourceLoader>,
-    gltf_texture_provider: Option<GltfTextureProvider>,
-    gltf_material_provider: Option<GltfMaterialProvider>,
+    // Store all loaded assets to keep them alive (prevent Drop from destroying entities)
+    gltf_assets: Vec<GltfAsset>,
     loaded_assets: Vec<LoadedAsset>,
     material_instances: Vec<MaterialInstance>,
     material_names: Vec<String>,
@@ -28,11 +25,7 @@ pub struct AssetManager {
 impl AssetManager {
     pub fn new() -> Self {
         Self {
-            gltf_asset: None,
-            gltf_asset_loader: None,
-            gltf_resource_loader: None,
-            gltf_texture_provider: None,
-            gltf_material_provider: None,
+            gltf_assets: Vec::new(),
             loaded_assets: Vec::new(),
             material_instances: Vec::new(),
             material_names: Vec::new(),
@@ -55,6 +48,13 @@ impl AssetManager {
         &self.material_names
     }
 
+    pub fn clear(&mut self) {
+        self.gltf_assets.clear();
+        self.loaded_assets.clear();
+        self.material_instances.clear();
+        self.material_names.clear();
+    }
+
     pub fn load_gltf_from_path(
         &mut self,
         engine: &mut Engine,
@@ -63,21 +63,15 @@ impl AssetManager {
         path: &str,
     ) -> LoadedAsset {
         let gltf_bytes = load_gltf_bytes(path);
-        let mut material_provider =
-            GltfMaterialProvider::create_jit(engine, false)
-                .expect("Failed to create gltf material provider");
+        let mut material_provider = GltfMaterialProvider::create_jit(engine, false)
+            .expect("Failed to create gltf material provider");
         let mut texture_provider =
-            GltfTextureProvider::create_stb(engine)
-                .expect("Failed to create stb texture provider");
-        let mut asset_loader = GltfAssetLoader::create(
-            engine,
-            &mut material_provider,
-            entity_manager,
-        )
-        .expect("Failed to create gltf asset loader");
-        let mut resource_loader =
-            GltfResourceLoader::create(engine, None, true)
-                .expect("Failed to create gltf resource loader");
+            GltfTextureProvider::create_stb(engine).expect("Failed to create stb texture provider");
+        let mut asset_loader =
+            GltfAssetLoader::create(engine, &mut material_provider, entity_manager)
+                .expect("Failed to create gltf asset loader");
+        let mut resource_loader = GltfResourceLoader::create(engine, None, true)
+            .expect("Failed to create gltf resource loader");
         resource_loader.add_texture_provider("image/png", &mut texture_provider);
         resource_loader.add_texture_provider("image/jpeg", &mut texture_provider);
 
@@ -105,17 +99,11 @@ impl AssetManager {
             root_entity,
         };
 
-        self.gltf_asset = Some(asset);
-        self.gltf_asset_loader = Some(asset_loader);
-        self.gltf_resource_loader = Some(resource_loader);
-        self.gltf_texture_provider = Some(texture_provider);
-        self.gltf_material_provider = Some(material_provider);
-
-        if let Some(asset) = self.gltf_asset.as_mut() {
-            let (instances, names) = asset.material_instances();
-            self.material_instances.extend(instances);
-            self.material_names.extend(names);
-        }
+        // Keep asset alive by storing it (prevents Drop from destroying entities)
+        let (instances, names) = asset.material_instances();
+        self.material_instances.extend(instances);
+        self.material_names.extend(names);
+        self.gltf_assets.push(asset);
         self.loaded_assets.push(loaded_asset.clone());
         loaded_asset
     }
