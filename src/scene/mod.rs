@@ -1,6 +1,5 @@
 pub mod serialization;
 
-use crate::assets::LoadedAsset;
 use crate::filament::Entity;
 
 /// Asset-specific data - matches what can be edited in UI
@@ -29,19 +28,11 @@ pub struct EnvironmentData {
     pub intensity: f32,
 }
 
-/// Runtime object in the scene - contains editable parameters + runtime entity reference
+/// Serializable scene object.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SceneObject {
     pub name: String,
     pub kind: SceneObjectKind,
-    // Runtime entity reference (not serialized - regenerated on load)
-    #[serde(skip)]
-    pub root_entity: Option<Entity>,
-    // Bounding box (for assets, computed at load time)
-    #[serde(skip)]
-    pub center: [f32; 3],
-    #[serde(skip)]
-    pub extent: [f32; 3],
 }
 
 /// Type-specific editable data - this is what gets saved/loaded
@@ -55,6 +46,42 @@ pub enum SceneObjectKind {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct SceneState {
     objects: Vec<SceneObject>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuntimeObject {
+    pub root_entity: Option<Entity>,
+    pub center: [f32; 3],
+    pub extent: [f32; 3],
+}
+
+#[derive(Default)]
+pub struct SceneRuntime {
+    objects: Vec<RuntimeObject>,
+}
+
+impl SceneRuntime {
+    pub fn new() -> Self {
+        Self {
+            objects: Vec::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.objects.clear();
+    }
+
+    pub fn push(&mut self, object: RuntimeObject) {
+        self.objects.push(object);
+    }
+
+    pub fn get(&self, index: usize) -> Option<&RuntimeObject> {
+        self.objects.get(index)
+    }
+
+    pub fn replace(&mut self, objects: Vec<RuntimeObject>) {
+        self.objects = objects;
+    }
 }
 
 impl SceneState {
@@ -79,33 +106,22 @@ impl SceneState {
         self.objects.get_mut(index)
     }
 
-    pub fn add_asset(&mut self, asset: &LoadedAsset, path: &str) {
+    pub fn add_asset(&mut self, name: String, path: &str) {
         self.objects.push(SceneObject {
-            name: asset.name.clone(),
+            name,
             kind: SceneObjectKind::Asset(AssetData {
                 path: path.to_string(),
                 position: [0.0, 0.0, 0.0],
                 rotation_deg: [0.0, 0.0, 0.0],
                 scale: [1.0, 1.0, 1.0],
             }),
-            center: asset.center,
-            extent: asset.extent,
-            root_entity: Some(asset.root_entity),
         });
     }
 
-    pub fn add_directional_light(
-        &mut self,
-        name: &str,
-        entity: Entity,
-        data: DirectionalLightData,
-    ) {
+    pub fn add_directional_light(&mut self, name: &str, data: DirectionalLightData) {
         self.objects.push(SceneObject {
             name: name.to_string(),
             kind: SceneObjectKind::DirectionalLight(data),
-            center: [0.0, 0.0, 0.0],
-            extent: [0.0, 0.0, 0.0],
-            root_entity: Some(entity),
         });
     }
 
@@ -126,9 +142,6 @@ impl SceneState {
                 self.objects.push(SceneObject {
                     name: "Environment".to_string(),
                     kind: SceneObjectKind::Environment(data),
-                    center: [0.0, 0.0, 0.0],
-                    extent: [0.0, 0.0, 0.0],
-                    root_entity: None,
                 });
             }
         }
@@ -139,9 +152,6 @@ impl SceneState {
         self.objects.push(object);
     }
 
-    pub fn replace_objects(&mut self, objects: Vec<SceneObject>) {
-        self.objects = objects;
-    }
 }
 
 pub fn compose_transform_matrix(

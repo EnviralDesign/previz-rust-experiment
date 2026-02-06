@@ -45,9 +45,6 @@ mod tests {
                 intensity: 100_000.0,
                 direction: [0.0, -1.0, -0.5],
             }),
-            root_entity: None,
-            center: [0.0, 0.0, 0.0],
-            extent: [0.0, 0.0, 0.0],
         });
 
         let json = serde_json::to_string_pretty(&scene).unwrap();
@@ -77,9 +74,6 @@ mod tests {
                 rotation_deg: [10.0, 20.0, 30.0],
                 scale: [1.0, 1.0, 1.0],
             }),
-            root_entity: None,
-            center: [9.0, 9.0, 9.0],
-            extent: [8.0, 8.0, 8.0],
         });
         scene.add_object(SceneObject {
             name: "Environment".to_string(),
@@ -89,9 +83,6 @@ mod tests {
                 skybox_path: "sky.ktx".to_string(),
                 intensity: 12000.0,
             }),
-            root_entity: None,
-            center: [1.0, 1.0, 1.0],
-            extent: [2.0, 2.0, 2.0],
         });
 
         let json = serde_json::to_string_pretty(&scene).unwrap();
@@ -101,7 +92,5 @@ mod tests {
 
         let loaded: SceneState = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.objects().len(), 2);
-        assert_eq!(loaded.objects()[0].center, [0.0, 0.0, 0.0]);
-        assert_eq!(loaded.objects()[0].extent, [0.0, 0.0, 0.0]);
     }
 }

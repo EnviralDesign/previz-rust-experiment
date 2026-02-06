@@ -30,6 +30,7 @@ Design principle:
 ## Documentation
 
 - `docs/V0_2_ARCHITECTURE.md`: active architecture and implementation plan for both of us.
+- `docs/M1_EXECUTION_CHECKLIST.md`: concrete implementation checklist for the current milestone.
 - `SUMMARY_AND_NEXT_STEPS.md`: legacy integration notes retained for historical context.
 
 ## Prerequisites

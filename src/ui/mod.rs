@@ -1,5 +1,5 @@
 use crate::assets::AssetManager;
-use crate::scene::SceneState;
+use crate::scene::{SceneRuntime, SceneState};
 
 pub struct UiState {
     show_asset_panel: bool,
@@ -56,19 +56,20 @@ impl UiState {
         }
     }
 
-    pub fn update(&mut self, scene: &SceneState, assets: &AssetManager) {
+    pub fn update(&mut self, scene: &SceneState, runtime: &SceneRuntime, assets: &AssetManager) {
         if self.show_asset_panel {
             let mut summary = String::new();
-            for object in scene.objects() {
+            for (index, object) in scene.objects().iter().enumerate() {
+                let runtime_object = runtime.get(index).copied().unwrap_or_default();
                 summary.push_str(&format!(
                     "{} (center {:.2}, {:.2}, {:.2}, extent {:.2}, {:.2}, {:.2})\n",
                     object.name,
-                    object.center[0],
-                    object.center[1],
-                    object.center[2],
-                    object.extent[0],
-                    object.extent[1],
-                    object.extent[2]
+                    runtime_object.center[0],
+                    runtime_object.center[1],
+                    runtime_object.center[2],
+                    runtime_object.extent[0],
+                    runtime_object.extent[1],
+                    runtime_object.extent[2]
                 ));
             }
             summary.push_str(&format!("Loaded assets: {}", assets.loaded_assets().len()));

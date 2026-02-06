@@ -97,6 +97,30 @@ Each command:
 - updates `SceneRuntime`
 - returns structured success/failure
 
+## Authoring UX Foundations
+
+Authoring UX is required, but must be staged behind stable runtime boundaries.
+
+Foundation order:
+1. Camera/navigation primitives:
+   - orbit/arcball scene navigation
+   - pan and dolly
+   - focus selected (`F`) framing
+2. Selection coherence:
+   - outliner selection and scene selection must always match
+   - selected-object highlight in viewport
+3. Picking:
+   - click object to select
+   - deterministic tie-breaking and clear miss behavior
+4. Non-visual object representation:
+   - lights and helpers shown with viewport icons/proxies
+5. Transform editing:
+   - translate/rotate/scale gizmos
+   - command-driven transform operations with undo-ready structure
+
+Rule:
+- no authoring UX feature should directly bypass scene command/runtime boundaries.
+
 ## Asset and Material Strategy
 
 Support both pipelines:
@@ -141,15 +165,20 @@ Bundle should include:
 - formalize `SceneRuntime` type
 - add load/reload stress test path
 - strengthen error reporting for asset/material failures
+- establish camera/navigation contract (including focus selected behavior)
 
 ### M2: Command-Driven Runtime
 - add command API for scene mutations
 - migrate UI handlers to command calls
 - reduce `app` orchestration complexity
+- implement selection model as first-class state (outliner and viewport unified)
 
 ### M3: Kit-of-Parts Authoring
 - support mesh + material + texture workflows beyond plain glTF
 - add parameter/slot metadata for creative-safe controls
+- add picking + selected-object highlight
+- add non-visual object viewport proxies/icons
+- add transform gizmos (translate/rotate/scale) on command layer
 
 ### M4: Media + Sequencing
 - introduce media source abstraction

@@ -5,7 +5,8 @@ use crate::assets::AssetManager;
 use crate::filament::Entity;
 use crate::render::{CameraController, CameraMovement, RenderContext};
 use crate::scene::{
-    compose_transform_matrix, DirectionalLightData, EnvironmentData, SceneObjectKind, SceneState,
+    compose_transform_matrix, DirectionalLightData, EnvironmentData, RuntimeObject, SceneObjectKind,
+    SceneRuntime, SceneState,
 };
 use crate::ui::{MaterialParams, UiState};
 use input::{InputAction, InputState};
@@ -23,10 +24,22 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+enum SceneCommand {
+    AddAsset { path: String },
+    SaveScene { path: PathBuf },
+    LoadScene { path: PathBuf },
+}
+
+enum CommandOutcome {
+    None,
+    Message(String),
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     assets: AssetManager,
     scene: SceneState,
+    scene_runtime: SceneRuntime,
     ui: UiState,
     input: InputState,
     modifiers: Modifiers,
@@ -47,6 +60,7 @@ impl App {
             window: None,
             assets: AssetManager::new(),
             scene: SceneState::new(),
+            scene_runtime: SceneRuntime::new(),
             ui: UiState::new(),
             input: InputState::default(),
             modifiers: Modifiers::default(),
@@ -116,7 +130,7 @@ impl App {
 
     fn render(&mut self) {
         let frame_start = Instant::now();
-        self.ui.update(&self.scene, &self.assets);
+        self.ui.update(&self.scene, &self.scene_runtime, &self.assets);
         let ui_text = self.ui.summary().to_string();
         let object_names: Vec<CString> = self
             .scene
@@ -156,7 +170,10 @@ impl App {
                         light_settings.color = data.color;
                         light_settings.intensity = data.intensity;
                         light_settings.direction = data.direction;
-                        selected_light_entity = object.root_entity;
+                        selected_light_entity = self
+                            .scene_runtime
+                            .get(selected_index as usize)
+                            .and_then(|runtime| runtime.root_entity);
                         1
                     }
                     SceneObjectKind::Environment(data) => {
@@ -267,7 +284,11 @@ impl App {
                                     changed = true;
                                 }
                                 if changed {
-                                    if let Some(entity) = object.root_entity {
+                                    if let Some(entity) = self
+                                        .scene_runtime
+                                        .get(selected_index as usize)
+                                        .and_then(|runtime| runtime.root_entity)
+                                    {
                                         let matrix = compose_transform_matrix(
                                             data.position,
                                             data.rotation_deg,
@@ -365,12 +386,20 @@ impl App {
             self.handle_create_light_action();
         }
         if create_environment {
+            let had_environment = self
+                .scene
+                .objects()
+                .iter()
+                .any(|object| matches!(object.kind, SceneObjectKind::Environment(_)));
             self.scene.set_environment(EnvironmentData {
                 hdr_path: String::new(),
                 ibl_path: String::new(),
                 skybox_path: String::new(),
                 intensity: 30_000.0,
             });
+            if !had_environment {
+                self.scene_runtime.push(RuntimeObject::default());
+            }
         }
         if save_scene {
             self.handle_save_scene_action();
@@ -412,7 +441,12 @@ impl App {
                     loaded.center,
                     loaded.extent
                 );
-                self.scene.add_asset(&loaded, path_str);
+                self.scene.add_asset(loaded.name.clone(), path_str);
+                self.scene_runtime.push(RuntimeObject {
+                    root_entity: Some(loaded.root_entity),
+                    center: loaded.center,
+                    extent: loaded.extent,
+                });
                 self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
                 self.camera.apply(render.camera_mut());
             }
@@ -439,13 +473,17 @@ impl App {
         scene.add_entity(light_entity);
         self.scene.add_directional_light(
             "Directional Light",
-            light_entity,
             DirectionalLightData {
                 color: [1.0, 1.0, 1.0],
                 intensity: 100_000.0,
                 direction: [0.0, -1.0, -0.5],
             },
         );
+        self.scene_runtime.push(RuntimeObject {
+            root_entity: Some(light_entity),
+            center: [0.0, 0.0, 0.0],
+            extent: [0.0, 0.0, 0.0],
+        });
         render.set_light_entity(light_entity);
     }
 
@@ -494,9 +532,10 @@ impl App {
 
         render.clear_scene();
         self.assets.clear();
+        self.scene_runtime.clear();
 
         let source_objects = self.scene.objects().to_vec();
-        let mut rebuilt_objects = Vec::with_capacity(source_objects.len());
+        let mut runtime_objects = Vec::with_capacity(source_objects.len());
         let mut transforms_to_apply: Vec<(Entity, [f32; 16])> = Vec::new();
         let mut first_asset_bounds: Option<([f32; 3], [f32; 3])> = None;
         let mut active_light: Option<Entity> = None;
@@ -510,7 +549,7 @@ impl App {
                 "Rebuilding runtime scene from {} serialized objects",
                 source_objects.len()
             );
-            for mut object in source_objects {
+            for object in source_objects {
                 match object.kind.clone() {
                     SceneObjectKind::Asset(data) => {
                         log::info!("Rehydrate asset '{}'", data.path);
@@ -519,9 +558,6 @@ impl App {
                             .load_gltf_from_path(engine, scene, &mut entity_manager, &data.path)
                         {
                             Ok(loaded) => {
-                                object.root_entity = Some(loaded.root_entity);
-                                object.center = loaded.center;
-                                object.extent = loaded.extent;
                                 transforms_to_apply.push((
                                     loaded.root_entity,
                                     compose_transform_matrix(
@@ -533,10 +569,15 @@ impl App {
                                 if first_asset_bounds.is_none() {
                                     first_asset_bounds = Some((loaded.center, loaded.extent));
                                 }
-                                rebuilt_objects.push(object);
+                                runtime_objects.push(RuntimeObject {
+                                    root_entity: Some(loaded.root_entity),
+                                    center: loaded.center,
+                                    extent: loaded.extent,
+                                });
                             }
                             Err(err) => {
                                 errors.push(format!("Asset '{}' failed to load: {}", data.path, err));
+                                runtime_objects.push(RuntimeObject::default());
                             }
                         }
                     }
@@ -548,26 +589,23 @@ impl App {
                             data.direction,
                         );
                         scene.add_entity(light_entity);
-                        object.root_entity = Some(light_entity);
-                        object.center = [0.0, 0.0, 0.0];
-                        object.extent = [0.0, 0.0, 0.0];
                         if active_light.is_none() {
                             active_light = Some(light_entity);
                         }
-                        rebuilt_objects.push(object);
+                        runtime_objects.push(RuntimeObject {
+                            root_entity: Some(light_entity),
+                            center: [0.0, 0.0, 0.0],
+                            extent: [0.0, 0.0, 0.0],
+                        });
                     }
                     SceneObjectKind::Environment(data) => {
-                        object.root_entity = None;
-                        object.center = [0.0, 0.0, 0.0];
-                        object.extent = [0.0, 0.0, 0.0];
                         environment_data = Some(data);
-                        rebuilt_objects.push(object);
+                        runtime_objects.push(RuntimeObject::default());
                     }
                 }
             }
         }
-
-        self.scene.replace_objects(rebuilt_objects);
+        self.scene_runtime.replace(runtime_objects);
 
         for (entity, matrix) in transforms_to_apply {
             render.set_entity_transform(entity, matrix);
