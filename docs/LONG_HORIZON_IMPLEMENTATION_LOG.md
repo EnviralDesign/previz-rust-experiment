@@ -67,6 +67,27 @@ This file captures medium/long-run implementation context so we do not lose inte
 - Current runtime format support:
   - `.ktx` only (image/video files are still persisted but reported as unsupported for runtime apply).
 
+### New vertical slice completed: image texture authoring flow
+- UI additions in Material panel:
+  - texture parameter text field
+  - texture source path field
+  - `Pick Texture...` button
+  - `Apply Texture Binding` button
+- Import/cache pipeline:
+  - accepts `.ktx`, `.png`, `.jpg`, `.jpeg`
+  - PNG/JPG are converted to cached KTX via Filament `mipgen`
+  - cache path: `assets/cache/textures/<sha256>.ktx`
+  - hash key is source file bytes (sha256)
+- Binding model updates:
+  - texture binding data now stores:
+    - source path
+    - source hash
+    - resolved runtime KTX path
+- Runtime behavior:
+  - apply immediately when command is executed (if render/context available)
+  - re-apply during scene rebuild/load
+  - bound textures retained in `RenderContext.material_textures` to preserve lifetime
+
 ### Known constraints
 - Texture path/slot authoring UI is not yet wired.
 - Video texture/media pipeline remains planned, not implemented.

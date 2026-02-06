@@ -96,6 +96,7 @@ Status:
 - M2 slice 2 in progress: material override identity now object-scoped (`object_id + material_slot`) and material UI list is scoped to selected object.
 - M2 slice 3 in progress: texture/media binding schema + command scaffolding exists, with runtime texture apply pending Filament texture-parameter FFI plumbing.
 - M2 slice 3 update: runtime texture apply is now wired for `.ktx` texture bindings; broader image/video source support remains pending.
+- M2 slice 4 update: image texture authoring flow is wired end-to-end (`Pick` -> PNG/JPG cache to KTX -> apply now + persist/reload).
 
 Each command:
 - validates inputs

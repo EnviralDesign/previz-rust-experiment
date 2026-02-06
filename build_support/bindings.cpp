@@ -1119,6 +1119,12 @@ void filagui_imgui_helper_render_scene_ui(
     float* material_metallic,
     float* material_roughness,
     float* material_emissive_rgb,
+    char* material_texture_param,
+    int material_texture_param_capacity,
+    char* material_texture_source,
+    int material_texture_source_capacity,
+    bool* material_pick_texture,
+    bool* material_apply_texture,
     char* hdr_path,
     int hdr_path_capacity,
     char* ibl_path,
@@ -1321,6 +1327,33 @@ void filagui_imgui_helper_render_scene_ui(
             }
             if (material_emissive_rgb) {
                 ImGui::ColorEdit3("Emissive", material_emissive_rgb);
+            }
+            ImGui::Separator();
+            if (material_texture_param && material_texture_param_capacity > 0) {
+                ImGui::InputText(
+                    "Texture Param",
+                    material_texture_param,
+                    (size_t)material_texture_param_capacity
+                );
+            }
+            if (material_texture_source && material_texture_source_capacity > 0) {
+                ImGui::InputText(
+                    "Texture Source",
+                    material_texture_source,
+                    (size_t)material_texture_source_capacity
+                );
+            }
+            if (material_pick_texture) {
+                *material_pick_texture = false;
+                if (ImGui::Button("Pick Texture...", ImVec2(-1, 0))) {
+                    *material_pick_texture = true;
+                }
+            }
+            if (material_apply_texture) {
+                *material_apply_texture = false;
+                if (ImGui::Button("Apply Texture Binding", ImVec2(-1, 0))) {
+                    *material_apply_texture = true;
+                }
             }
             if (!has_material) {
                 ImGui::EndDisabled();

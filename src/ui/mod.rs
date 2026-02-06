@@ -8,6 +8,8 @@ pub struct UiState {
     light_settings: LightSettings,
     selected_material_index: i32,
     material_params: MaterialParams,
+    material_texture_param: [u8; 128],
+    material_texture_source: [u8; 260],
     environment_hdr_path: [u8; 260],
     environment_ibl_path: [u8; 260],
     environment_skybox_path: [u8; 260],
@@ -48,6 +50,13 @@ impl UiState {
                 roughness: 1.0,
                 emissive_rgb: [0.0, 0.0, 0.0],
             },
+            material_texture_param: {
+                let mut buf = [0u8; 128];
+                let value = b"baseColorMap";
+                buf[..value.len()].copy_from_slice(value);
+                buf
+            },
+            material_texture_source: [0u8; 260],
             environment_hdr_path: [0u8; 260],
             environment_ibl_path: [0u8; 260],
             environment_skybox_path: [0u8; 260],
@@ -113,6 +122,28 @@ impl UiState {
 
     pub fn set_material_params(&mut self, params: MaterialParams) {
         self.material_params = params;
+    }
+
+    pub fn material_texture_binding_mut(&mut self) -> (&mut [u8; 128], &mut [u8; 260]) {
+        (&mut self.material_texture_param, &mut self.material_texture_source)
+    }
+
+    pub fn texture_and_environment_paths_mut(
+        &mut self,
+    ) -> (
+        &mut [u8; 128],
+        &mut [u8; 260],
+        &mut [u8; 260],
+        &mut [u8; 260],
+        &mut [u8; 260],
+    ) {
+        (
+            &mut self.material_texture_param,
+            &mut self.material_texture_source,
+            &mut self.environment_hdr_path,
+            &mut self.environment_ibl_path,
+            &mut self.environment_skybox_path,
+        )
     }
 
     pub fn environment_paths_mut(

@@ -202,6 +202,8 @@ mod tests {
                 texture_param: "baseColorMap".to_string(),
                 source_kind: MediaSourceKind::Image,
                 source_path: "assets/textures/albedo.png".to_string(),
+                runtime_ktx_path: Some("assets/cache/textures/albedo_hash.ktx".to_string()),
+                source_hash: Some("abc123".to_string()),
             },
         );
 
@@ -214,5 +216,10 @@ mod tests {
         assert_eq!(entry.binding.texture_param, "baseColorMap");
         assert_eq!(entry.binding.source_kind, MediaSourceKind::Image);
         assert_eq!(entry.binding.source_path, "assets/textures/albedo.png");
+        assert_eq!(
+            entry.binding.runtime_ktx_path.as_deref(),
+            Some("assets/cache/textures/albedo_hash.ktx")
+        );
+        assert_eq!(entry.binding.source_hash.as_deref(), Some("abc123"));
     }
 }

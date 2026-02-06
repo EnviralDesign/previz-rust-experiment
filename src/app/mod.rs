@@ -6,10 +6,12 @@ use crate::filament::Entity;
 use crate::render::{CameraController, CameraMovement, RenderContext, RenderError};
 use crate::scene::{
     compose_transform_matrix, DirectionalLightData, EnvironmentData, MaterialOverrideData,
-    MaterialTextureBindingData, RuntimeObject, SceneObjectKind, SceneRuntime, SceneState,
+    MaterialTextureBindingData, MediaSourceKind, RuntimeObject, SceneObjectKind, SceneRuntime,
+    SceneState,
 };
 use crate::ui::{MaterialParams, UiState};
 use input::InputState;
+use sha2::{Digest, Sha256};
 use timing::FrameTiming;
 
 use std::ffi::CString;
@@ -406,12 +408,21 @@ impl App {
         let mut create_environment = false;
         let mut save_scene = false;
         let mut load_scene = false;
+        let mut material_pick_texture = false;
+        let mut material_apply_texture = false;
         let mut pending_transform_command: Option<SceneCommand> = None;
         let mut pending_update_light_command: Option<SceneCommand> = None;
         let mut pending_update_environment_command: Option<SceneCommand> = None;
         let mut pending_set_material_command: Option<SceneCommand> = None;
-        let (hdr_path_string, ibl_path_string, skybox_path_string) = {
-            let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
+        let (
+            material_texture_param_string,
+            material_texture_source_string,
+            hdr_path_string,
+            ibl_path_string,
+            skybox_path_string,
+        ) = {
+            let (material_texture_param, material_texture_source, hdr_path, ibl_path, skybox_path) =
+                self.ui.texture_and_environment_paths_mut();
             if let Some(render) = &mut self.render {
                 let (mx, my) = if self.window_focused {
                     self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
@@ -441,6 +452,10 @@ impl App {
                     &mut material_params.metallic,
                     &mut material_params.roughness,
                     &mut material_params.emissive_rgb,
+                    material_texture_param,
+                    material_texture_source,
+                    &mut material_pick_texture,
+                    &mut material_apply_texture,
                     hdr_path,
                     ibl_path,
                     skybox_path,
@@ -457,6 +472,8 @@ impl App {
                 self.timing.set_render_ms(render_ms);
             }
             (
+                buffer_to_string(material_texture_param),
+                buffer_to_string(material_texture_source),
                 buffer_to_string(hdr_path),
                 buffer_to_string(ibl_path),
                 buffer_to_string(skybox_path),
@@ -596,6 +613,51 @@ impl App {
         if let Some(command) = pending_set_material_command {
             let result = self.execute_scene_command(command);
             self.apply_command_feedback("Failed to update material parameters", result);
+        }
+        if material_pick_texture {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Texture", &["ktx", "png", "jpg", "jpeg"])
+                .pick_file()
+            {
+                if let Some(path_string) = path.to_str() {
+                    let (_param_buf, source_buf) = self.ui.material_texture_binding_mut();
+                    write_string_to_buffer(path_string, source_buf);
+                }
+            }
+        }
+        if material_apply_texture {
+            if selected_material_global_index >= 0 {
+                if let Some(binding) = self
+                    .assets
+                    .material_binding(selected_material_global_index as usize)
+                    .cloned()
+                {
+                    match prepare_texture_binding_data(
+                        &material_texture_param_string,
+                        &material_texture_source_string,
+                    ) {
+                        Ok(texture_binding) => {
+                            let result = self.execute_scene_command(
+                                SceneCommand::SetMaterialTextureBinding {
+                                    object_id: binding.object_id,
+                                    material_slot: binding.material_slot,
+                                    binding: texture_binding,
+                                },
+                            );
+                            self.apply_command_feedback(
+                                "Failed to set material texture binding",
+                                result,
+                            );
+                        }
+                        Err(message) => {
+                            self.ui.set_environment_status(format!(
+                                "Failed to prepare texture binding:\n{}",
+                                message
+                            ));
+                        }
+                    }
+                }
+            }
         }
         if environment_apply {
             let result = self.execute_scene_command(SceneCommand::SetEnvironment {
@@ -916,15 +978,15 @@ impl App {
             }));
         };
 
-        if !is_ktx_path(&binding.source_path) {
+        let Some(runtime_path) = texture_binding_runtime_path(&binding) else {
             return Ok(CommandOutcome::Notice(CommandNotice {
                 severity: CommandSeverity::Warning,
                 message: format!(
-                    "Stored texture binding '{}' but runtime apply currently supports only .ktx paths.",
+                    "Stored texture binding '{}' but no runtime .ktx path is available.",
                     binding.texture_param
                 ),
             }));
-        }
+        };
 
         let (assets, render_ref) = (&mut self.assets, render);
         let index_opt = (0..assets.material_instances().len()).find(|index| {
@@ -954,7 +1016,7 @@ impl App {
         let applied = render_ref.bind_material_texture_from_ktx(
             material_instance,
             &binding.texture_param,
-            &binding.source_path,
+            &runtime_path,
         );
         if applied {
             Ok(CommandOutcome::Notice(CommandNotice {
@@ -969,7 +1031,7 @@ impl App {
                 severity: CommandSeverity::Warning,
                 message: format!(
                     "Stored texture binding '{}' but runtime apply failed for '{}'.",
-                    binding.texture_param, binding.source_path
+                    binding.texture_param, runtime_path
                 ),
             }))
         }
@@ -1495,6 +1557,8 @@ mod tests {
                 texture_param: "baseColorMap".to_string(),
                 source_kind: MediaSourceKind::Image,
                 source_path: "  ".to_string(),
+                runtime_ktx_path: None,
+                source_hash: None,
             },
         });
         assert!(matches!(result, Err(CommandError::TextureBindingSourceEmpty)));
@@ -1510,6 +1574,8 @@ mod tests {
                 texture_param: "normalMap".to_string(),
                 source_kind: MediaSourceKind::Image,
                 source_path: "assets/textures/normal.png".to_string(),
+                runtime_ktx_path: None,
+                source_hash: None,
             },
         });
         assert!(result.is_ok());
@@ -1589,6 +1655,108 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
     ))
 }
 
+fn prepare_texture_binding_data(
+    texture_param: &str,
+    source_path: &str,
+) -> Result<MaterialTextureBindingData, String> {
+    let texture_param = texture_param.trim();
+    if texture_param.is_empty() {
+        return Err("Texture parameter is empty.".to_string());
+    }
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err("Texture source path is empty.".to_string());
+    }
+
+    let source_kind = MediaSourceKind::Image;
+    let (runtime_ktx_path, source_hash) = resolve_runtime_texture_cache(source_path)?;
+
+    Ok(MaterialTextureBindingData {
+        texture_param: texture_param.to_string(),
+        source_kind,
+        source_path: source_path.to_string(),
+        runtime_ktx_path: Some(runtime_ktx_path),
+        source_hash: Some(source_hash),
+    })
+}
+
+fn resolve_runtime_texture_cache(source_path: &str) -> Result<(String, String), String> {
+    let source = resolve_path_for_read(source_path)?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if extension == "ktx" {
+        let hash = hash_file_bytes(&source)?;
+        return Ok((display_path_for_scene(&source), hash));
+    }
+    if extension != "png" && extension != "jpg" && extension != "jpeg" {
+        return Err(format!(
+            "Unsupported texture source extension '{}'. Use .ktx/.png/.jpg/.jpeg.",
+            extension
+        ));
+    }
+
+    let source_hash = hash_file_bytes(&source)?;
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cache_dir = manifest_dir.join("assets").join("cache").join("textures");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|err| format!("Failed to create texture cache folder: {}", err))?;
+    let ktx_path = cache_dir.join(format!("{source_hash}.ktx"));
+    if !ktx_path.exists() {
+        let mipgen_path = PathBuf::from(env!("FILAMENT_BIN_DIR")).join("mipgen.exe");
+        if !mipgen_path.exists() {
+            return Err(format!("mipgen not found at {}", mipgen_path.display()));
+        }
+        let status = Command::new(&mipgen_path)
+            .args(["-q", "-f", "ktx"])
+            .arg(&source)
+            .arg(&ktx_path)
+            .status()
+            .map_err(|err| format!("Failed to run mipgen: {}", err))?;
+        if !status.success() {
+            return Err(format!("mipgen failed with status {:?}", status.code()));
+        }
+    }
+    Ok((display_path_for_scene(&ktx_path), source_hash))
+}
+
+fn resolve_path_for_read(path: &str) -> Result<PathBuf, String> {
+    let raw = PathBuf::from(path);
+    if raw.exists() {
+        return Ok(raw);
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let joined = manifest_dir.join(path);
+    if joined.exists() {
+        return Ok(joined);
+    }
+    Err(format!("File not found: {}", path))
+}
+
+fn hash_file_bytes(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("Failed reading '{}': {}", path.display(), err))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{:02x}", byte);
+    }
+    Ok(hex)
+}
+
+fn display_path_for_scene(path: &std::path::Path) -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Ok(relative) = path.strip_prefix(&manifest_dir) {
+        return relative.to_string_lossy().to_string();
+    }
+    path.to_string_lossy().to_string()
+}
+
 fn apply_material_override(
     material_instance: &mut crate::filament::MaterialInstance,
     data: &MaterialOverrideData,
@@ -1650,16 +1818,15 @@ fn apply_scene_texture_bindings_to_runtime(
         return;
     }
     for entry in scene.texture_bindings() {
-        if !is_ktx_path(&entry.binding.source_path) {
+        let Some(runtime_path) = texture_binding_runtime_path(&entry.binding) else {
             errors.push(format!(
-                "Texture binding '{}' for object {} slot {} is '{}' (runtime currently supports .ktx only).",
+                "Texture binding '{}' for object {} slot {} has no runtime .ktx path.",
                 entry.binding.texture_param,
                 entry.object_id,
                 entry.material_slot,
-                entry.binding.source_path
             ));
             continue;
-        }
+        };
         let index_opt = (0..assets.material_instances().len()).find(|index| {
             assets
                 .material_binding(*index)
@@ -1686,19 +1853,25 @@ fn apply_scene_texture_bindings_to_runtime(
         let applied = render.bind_material_texture_from_ktx(
             material_instance,
             &entry.binding.texture_param,
-            &entry.binding.source_path,
+            &runtime_path,
         );
         if !applied {
             errors.push(format!(
                 "Texture binding '{}' failed to apply from '{}'.",
-                entry.binding.texture_param, entry.binding.source_path
+                entry.binding.texture_param, runtime_path
             ));
         }
     }
 }
 
-fn is_ktx_path(path: &str) -> bool {
-    path.trim().to_ascii_lowercase().ends_with(".ktx")
+fn texture_binding_runtime_path(binding: &MaterialTextureBindingData) -> Option<String> {
+    if let Some(path) = &binding.runtime_ktx_path {
+        return Some(path.clone());
+    }
+    if binding.source_path.trim().to_ascii_lowercase().ends_with(".ktx") {
+        return Some(binding.source_path.clone());
+    }
+    None
 }
 
 fn material_params_to_override(params: MaterialParams) -> MaterialOverrideData {

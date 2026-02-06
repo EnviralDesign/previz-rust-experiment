@@ -49,6 +49,10 @@ pub struct MaterialTextureBindingData {
     pub texture_param: String,
     pub source_kind: MediaSourceKind,
     pub source_path: String,
+    #[serde(default)]
+    pub runtime_ktx_path: Option<String>,
+    #[serde(default)]
+    pub source_hash: Option<String>,
 }
 
 /// Maps a material identity to user-authored override values.
