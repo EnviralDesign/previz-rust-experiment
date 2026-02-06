@@ -27,7 +27,6 @@ pub struct AssetManager {
     loaded_assets: Vec<LoadedAsset>,
     material_instances: Vec<MaterialInstance>,
     retired_material_instances: Vec<MaterialInstance>,
-    material_names: Vec<String>,
     material_bindings: Vec<MaterialBinding>,
     // glTF providers must outlive loaded assets/material instances.
     material_provider: Option<GltfMaterialProvider>,
@@ -64,7 +63,6 @@ impl AssetManager {
             loaded_assets: Vec::new(),
             material_instances: Vec::new(),
             retired_material_instances: Vec::new(),
-            material_names: Vec::new(),
             material_bindings: Vec::new(),
             material_provider: None,
             texture_provider: None,
@@ -83,10 +81,6 @@ impl AssetManager {
         &mut self.material_instances
     }
 
-    pub fn material_names(&self) -> &[String] {
-        &self.material_names
-    }
-
     pub fn material_binding(&self, index: usize) -> Option<&MaterialBinding> {
         self.material_bindings.get(index)
     }
@@ -98,7 +92,6 @@ impl AssetManager {
             .append(&mut self.material_instances);
         self.retired_gltf_assets.append(&mut self.gltf_assets);
         self.loaded_assets.clear();
-        self.material_names.clear();
         self.material_bindings.clear();
     }
 
@@ -174,7 +167,6 @@ impl AssetManager {
             })
             .collect();
         self.material_instances.extend(instances);
-        self.material_names.extend(names);
         self.material_bindings.extend(bindings);
         self.gltf_assets.push(asset);
         self.loaded_assets.push(loaded_asset.clone());
@@ -187,7 +179,6 @@ impl Drop for AssetManager {
         // Ensure material instances are dropped before assets/providers.
         self.material_instances.clear();
         self.retired_material_instances.clear();
-        self.material_names.clear();
         self.material_bindings.clear();
         self.gltf_assets.clear();
         self.retired_gltf_assets.clear();

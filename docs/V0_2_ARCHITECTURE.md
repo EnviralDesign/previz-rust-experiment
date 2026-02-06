@@ -93,6 +93,7 @@ Introduce explicit commands so UI stops mutating runtime state directly:
 
 Status:
 - M2 slice 1 in progress: `SetMaterialParam` now persists scene-level material overrides and reapplies them during runtime rebuild.
+- M2 slice 2 in progress: material override identity now object-scoped (`object_id + material_slot`) and material UI list is scoped to selected object.
 
 Each command:
 - validates inputs

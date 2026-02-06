@@ -113,7 +113,7 @@ pub struct App {
     assets: AssetManager,
     scene: SceneState,
     scene_runtime: SceneRuntime,
-    selection: Option<usize>,
+    selection_id: Option<u64>,
     ui: UiState,
     input: InputState,
     modifiers: Modifiers,
@@ -138,7 +138,7 @@ impl App {
             assets: AssetManager::new(),
             scene: SceneState::new(),
             scene_runtime: SceneRuntime::new(),
-            selection: None,
+            selection_id: None,
             ui: UiState::new(),
             input: InputState::default(),
             modifiers: Modifiers::default(),
@@ -265,7 +265,7 @@ impl App {
     }
 
     fn focus_selected(&mut self) -> bool {
-        let Some(selected) = self.selection else {
+        let Some(selected) = self.current_selection_index() else {
             return false;
         };
         let Some(runtime) = self.scene_runtime.get(selected) else {
@@ -301,6 +301,18 @@ impl App {
         }
     }
 
+    fn current_selection_index(&self) -> Option<usize> {
+        let selection_id = self.selection_id?;
+        self.scene
+            .objects()
+            .iter()
+            .position(|object| object.id == selection_id)
+    }
+
+    fn set_selection_from_index(&mut self, index: Option<usize>) {
+        self.selection_id = index.and_then(|idx| self.scene.objects().get(idx).map(|object| object.id));
+    }
+
     fn render(&mut self) {
         let frame_start = Instant::now();
         self.ui.update(&self.scene, &self.scene_runtime, &self.assets);
@@ -311,13 +323,7 @@ impl App {
             .into_iter()
             .map(sanitize_cstring)
             .collect();
-        let material_names: Vec<CString> = self
-            .assets
-            .material_names()
-            .iter()
-            .map(|name| sanitize_cstring(name))
-            .collect();
-        let mut selected_index = Self::selection_to_ui_index(self.selection);
+        let mut selected_index = Self::selection_to_ui_index(self.current_selection_index());
         let mut position = [0.0f32; 3];
         let mut rotation = [0.0f32; 3];
         let mut scale = [1.0f32; 3];
@@ -360,13 +366,26 @@ impl App {
                 };
             }
         }
-        let mut selected_material_index = self.ui.selected_material_index();
+        let scoped_material_indices = scoped_material_indices_for_selection(
+            &self.scene,
+            &self.assets,
+            self.current_selection_index(),
+        );
+        let material_names: Vec<CString> = scoped_material_indices
+            .iter()
+            .filter_map(|index| self.assets.material_binding(*index).map(|binding| binding.material_name.as_str()))
+            .map(sanitize_cstring)
+            .collect();
+
+        let previous_material_global_index = self.ui.selected_material_index();
+        let mut selected_material_index =
+            global_material_index_to_ui_index(&scoped_material_indices, previous_material_global_index);
         let mut material_params = self.ui.material_params();
-        let previous_material_selection = selected_material_index;
+        let previous_material_selection = previous_material_global_index;
         let previous_material_params = material_params;
-        let original_material_binding = if previous_material_selection >= 0 {
+        let original_material_binding = if previous_material_global_index >= 0 {
             self.assets
-                .material_binding(previous_material_selection as usize)
+                .material_binding(previous_material_global_index as usize)
                 .cloned()
         } else {
             None
@@ -435,18 +454,22 @@ impl App {
                 buffer_to_string(skybox_path),
             )
         };
-        let previous_selection = self.selection;
-        self.selection = Self::normalize_selection(selected_index, self.scene.objects().len());
-        selected_index = Self::selection_to_ui_index(self.selection);
+        let previous_selection_id = self.selection_id;
+        self.set_selection_from_index(Self::normalize_selection(selected_index, self.scene.objects().len()));
+        selected_index = Self::selection_to_ui_index(self.current_selection_index());
         self.ui.set_selected_index(selected_index);
         self.ui.set_light_settings(light_settings);
-        self.ui.set_selected_material_index(selected_material_index);
+        let selected_material_global_index =
+            ui_material_index_to_global_index(&scoped_material_indices, selected_material_index);
+        self.ui
+            .set_selected_material_index(selected_material_global_index);
         self.ui.set_material_params(material_params);
         self.ui.set_environment_intensity(environment_intensity);
         let selected_runtime_entity = self
-            .selection
+            .current_selection_index()
             .and_then(|index| self.scene_runtime.get(index))
             .and_then(|runtime| runtime.root_entity);
+        let current_selection_index = self.current_selection_index();
 
         if let Some(render) = &mut self.render {
             render.set_selected_entity(selected_runtime_entity);
@@ -458,8 +481,8 @@ impl App {
                     light_settings.direction,
                 );
             }
-            if self.selection == previous_selection {
-                if let Some(selected) = self.selection {
+            if self.selection_id == previous_selection_id {
+                if let Some(selected) = current_selection_index {
                     if can_edit_transform {
                         if let Some((old_position, old_rotation, old_scale)) = original_asset_transform
                         {
@@ -528,7 +551,7 @@ impl App {
                     }
                 }
             }
-            if selected_material_index == previous_material_selection
+            if selected_material_global_index == previous_material_selection
                 && previous_material_params != material_params
             {
                 if let Some(binding) = original_material_binding.clone() {
@@ -541,9 +564,9 @@ impl App {
                     });
                 }
             }
-            if selected_material_index != previous_material_selection {
+            if selected_material_global_index != previous_material_selection {
                 if let Some(params) =
-                    load_material_params(&mut self.assets, selected_material_index)
+                    load_material_params(&mut self.assets, selected_material_global_index)
                 {
                     self.ui.set_material_params(params);
                 }
@@ -1796,4 +1819,56 @@ pub fn run() {
 fn sanitize_cstring(value: &str) -> CString {
     let cleaned = value.replace('\0', " ");
     CString::new(cleaned).unwrap_or_default()
+}
+
+fn scoped_material_indices_for_selection(
+    scene: &SceneState,
+    assets: &AssetManager,
+    selection: Option<usize>,
+) -> Vec<usize> {
+    let Some(selected_index) = selection else {
+        return Vec::new();
+    };
+    let Some(selected_object) = scene.objects().get(selected_index) else {
+        return Vec::new();
+    };
+    if !matches!(selected_object.kind, SceneObjectKind::Asset(_)) {
+        return Vec::new();
+    }
+    let object_id = selected_object.id;
+    (0..assets.material_instances().len())
+        .filter(|index| {
+            assets
+                .material_binding(*index)
+                .map(|binding| binding.object_id == object_id)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn global_material_index_to_ui_index(scoped_indices: &[usize], global_index: i32) -> i32 {
+    if global_index < 0 {
+        return -1;
+    }
+    let Some(global_usize) = usize::try_from(global_index).ok() else {
+        return -1;
+    };
+    scoped_indices
+        .iter()
+        .position(|index| *index == global_usize)
+        .and_then(|idx| i32::try_from(idx).ok())
+        .unwrap_or(-1)
+}
+
+fn ui_material_index_to_global_index(scoped_indices: &[usize], ui_index: i32) -> i32 {
+    if ui_index < 0 {
+        return -1;
+    }
+    let Some(ui_usize) = usize::try_from(ui_index).ok() else {
+        return -1;
+    };
+    scoped_indices
+        .get(ui_usize)
+        .and_then(|value| i32::try_from(*value).ok())
+        .unwrap_or(-1)
 }
