@@ -91,6 +91,9 @@ Introduce explicit commands so UI stops mutating runtime state directly:
 - `LoadScene`
 - `SaveScene`
 
+Status:
+- M2 slice 1 in progress: `SetMaterialParam` now persists scene-level material overrides and reapplies them during runtime rebuild.
+
 Each command:
 - validates inputs
 - mutates `SceneData`

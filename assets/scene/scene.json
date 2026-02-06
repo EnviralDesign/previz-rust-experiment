@@ -52,5 +52,25 @@
         }
       }
     }
+  ],
+  "material_overrides": [
+    {
+      "material_name": "Material_MR",
+      "data": {
+        "base_color_rgba": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "metallic": 1.0,
+        "roughness": 1.0,
+        "emissive_rgb": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    }
   ]
 }

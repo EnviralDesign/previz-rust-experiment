@@ -25,7 +25,10 @@ pub fn load_scene_from_file(path: &Path) -> Result<SceneState> {
 
 #[cfg(test)]
 mod tests {
-    use crate::scene::{AssetData, DirectionalLightData, EnvironmentData, SceneObject, SceneObjectKind, SceneState};
+    use crate::scene::{
+        AssetData, DirectionalLightData, EnvironmentData, MaterialOverrideData, SceneObject,
+        SceneObjectKind, SceneState,
+    };
 
     #[test]
     fn test_empty_scene_serialization() {
@@ -148,5 +151,29 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_material_overrides_roundtrip() {
+        let mut scene = SceneState::new();
+        scene.set_material_override(
+            "Material_MR".to_string(),
+            MaterialOverrideData {
+                base_color_rgba: [0.2, 0.3, 0.4, 1.0],
+                metallic: 0.8,
+                roughness: 0.25,
+                emissive_rgb: [0.1, 0.0, 0.2],
+            },
+        );
+
+        let json = serde_json::to_string_pretty(&scene).unwrap();
+        let loaded: SceneState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.material_overrides().len(), 1);
+        let entry = &loaded.material_overrides()[0];
+        assert_eq!(entry.material_name, "Material_MR");
+        assert_eq!(entry.data.base_color_rgba, [0.2, 0.3, 0.4, 1.0]);
+        assert_eq!(entry.data.metallic, 0.8);
+        assert_eq!(entry.data.roughness, 0.25);
+        assert_eq!(entry.data.emissive_rgb, [0.1, 0.0, 0.2]);
     }
 }

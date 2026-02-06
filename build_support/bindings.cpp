@@ -1260,7 +1260,10 @@ void filagui_imgui_helper_render_scene_ui(
             } else {
                 int current = selected_material_index ? *selected_material_index : -1;
                 if (current < 0 || current >= material_count) {
-                    current = -1;
+                    current = 0;
+                    if (selected_material_index) {
+                        *selected_material_index = 0;
+                    }
                 }
                 for (int i = 0; i < material_count; ++i) {
                     const char* name = material_names[i] ? material_names[i] : "Material";

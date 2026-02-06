@@ -28,6 +28,22 @@ pub struct EnvironmentData {
     pub intensity: f32,
 }
 
+/// Material override data persisted in scene JSON.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaterialOverrideData {
+    pub base_color_rgba: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive_rgb: [f32; 3],
+}
+
+/// Maps a material identity to user-authored override values.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaterialOverrideEntry {
+    pub material_name: String,
+    pub data: MaterialOverrideData,
+}
+
 /// Serializable scene object.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SceneObject {
@@ -46,6 +62,8 @@ pub enum SceneObjectKind {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct SceneState {
     objects: Vec<SceneObject>,
+    #[serde(default)]
+    material_overrides: Vec<MaterialOverrideEntry>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -62,9 +80,7 @@ pub struct SceneRuntime {
 
 impl SceneRuntime {
     pub fn new() -> Self {
-        Self {
-            objects: Vec::new(),
-        }
+        Self { objects: Vec::new() }
     }
 
     pub fn clear(&mut self) {
@@ -88,6 +104,7 @@ impl SceneState {
     pub fn new() -> Self {
         Self {
             objects: Vec::new(),
+            material_overrides: Vec::new(),
         }
     }
 
@@ -104,6 +121,23 @@ impl SceneState {
 
     pub fn object_mut(&mut self, index: usize) -> Option<&mut SceneObject> {
         self.objects.get_mut(index)
+    }
+
+    pub fn material_overrides(&self) -> &[MaterialOverrideEntry] {
+        &self.material_overrides
+    }
+
+    pub fn set_material_override(&mut self, material_name: String, data: MaterialOverrideData) {
+        if let Some(existing) = self
+            .material_overrides
+            .iter_mut()
+            .find(|entry| entry.material_name == material_name)
+        {
+            existing.data = data;
+            return;
+        }
+        self.material_overrides
+            .push(MaterialOverrideEntry { material_name, data });
     }
 
     pub fn add_asset(&mut self, name: String, path: &str) {

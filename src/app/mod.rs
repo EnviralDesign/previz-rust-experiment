@@ -5,8 +5,8 @@ use crate::assets::AssetManager;
 use crate::filament::Entity;
 use crate::render::{CameraController, CameraMovement, RenderContext, RenderError};
 use crate::scene::{
-    compose_transform_matrix, DirectionalLightData, EnvironmentData, RuntimeObject, SceneObjectKind,
-    SceneRuntime, SceneState,
+    compose_transform_matrix, DirectionalLightData, EnvironmentData, MaterialOverrideData,
+    RuntimeObject, SceneObjectKind, SceneRuntime, SceneState,
 };
 use crate::ui::{MaterialParams, UiState};
 use input::InputState;
@@ -37,6 +37,10 @@ enum SceneCommand {
     SetEnvironment {
         data: EnvironmentData,
         apply_runtime: bool,
+    },
+    SetMaterialParam {
+        material_name: String,
+        data: MaterialOverrideData,
     },
     TransformNode {
         index: usize,
@@ -357,6 +361,14 @@ impl App {
         let mut material_params = self.ui.material_params();
         let previous_material_selection = selected_material_index;
         let previous_material_params = material_params;
+        let original_material_name = if previous_material_selection >= 0 {
+            self.assets
+                .material_names()
+                .get(previous_material_selection as usize)
+                .cloned()
+        } else {
+            None
+        };
         let previous_environment_intensity = self.ui.environment_intensity();
         let mut environment_apply = false;
         let mut environment_generate = false;
@@ -368,6 +380,7 @@ impl App {
         let mut pending_transform_command: Option<SceneCommand> = None;
         let mut pending_update_light_command: Option<SceneCommand> = None;
         let mut pending_update_environment_command: Option<SceneCommand> = None;
+        let mut pending_set_material_command: Option<SceneCommand> = None;
         let (hdr_path_string, ibl_path_string, skybox_path_string) = {
             let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
@@ -513,13 +526,16 @@ impl App {
                     }
                 }
             }
-            apply_material_changes(
-                &mut self.assets,
-                selected_material_index,
-                previous_material_selection,
-                previous_material_params,
-                material_params,
-            );
+            if selected_material_index == previous_material_selection
+                && previous_material_params != material_params
+            {
+                if let Some(material_name) = original_material_name.clone() {
+                    pending_set_material_command = Some(SceneCommand::SetMaterialParam {
+                        material_name,
+                        data: material_params_to_override(material_params),
+                    });
+                }
+            }
             if selected_material_index != previous_material_selection {
                 if let Some(params) =
                     load_material_params(&mut self.assets, selected_material_index)
@@ -540,6 +556,10 @@ impl App {
         if let Some(command) = pending_update_environment_command {
             let result = self.execute_scene_command(command);
             self.apply_command_feedback("Failed to update environment", result);
+        }
+        if let Some(command) = pending_set_material_command {
+            let result = self.execute_scene_command(command);
+            self.apply_command_feedback("Failed to update material parameters", result);
         }
         if environment_apply {
             let result = self.execute_scene_command(SceneCommand::SetEnvironment {
@@ -602,6 +622,10 @@ impl App {
                 data,
                 apply_runtime,
             } => self.command_set_environment(data, apply_runtime),
+            SceneCommand::SetMaterialParam {
+                material_name,
+                data,
+            } => self.command_set_material_param(&material_name, data),
             SceneCommand::TransformNode {
                 index,
                 position,
@@ -662,6 +686,7 @@ impl App {
             center: loaded.center,
             extent: loaded.extent,
         });
+        apply_scene_material_overrides_to_runtime(&self.scene, &mut self.assets);
         self.orbit_pivot = loaded.center;
         self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
         self.camera.apply(render.camera_mut());
@@ -769,6 +794,39 @@ impl App {
             }))
         } else {
             Ok(CommandOutcome::None)
+        }
+    }
+
+    fn command_set_material_param(
+        &mut self,
+        material_name: &str,
+        data: MaterialOverrideData,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.scene
+            .set_material_override(material_name.to_string(), data.clone());
+
+        let mut applied_any = false;
+        let material_names = self.assets.material_names().to_vec();
+        for (index, name) in material_names.iter().enumerate() {
+            if name != material_name {
+                continue;
+            }
+            if let Some(material_instance) = self.assets.material_instances_mut().get_mut(index) {
+                apply_material_override(material_instance, &data);
+                applied_any = true;
+            }
+        }
+
+        if applied_any {
+            Ok(CommandOutcome::None)
+        } else {
+            Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!(
+                    "Material override saved but no active material matched '{}'.",
+                    material_name
+                ),
+            }))
         }
     }
 
@@ -984,6 +1042,7 @@ impl App {
             }
         }
         self.scene_runtime.replace(runtime_objects);
+        apply_scene_material_overrides_to_runtime(&self.scene, &mut self.assets);
 
         for (entity, matrix) in transforms_to_apply {
             if !render.set_entity_transform(entity, matrix) {
@@ -1341,37 +1400,47 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
     ))
 }
 
-fn apply_material_changes(
-    assets: &mut AssetManager,
-    selected_index: i32,
-    previous_index: i32,
-    previous_params: MaterialParams,
-    params: MaterialParams,
+fn apply_material_override(
+    material_instance: &mut crate::filament::MaterialInstance,
+    data: &MaterialOverrideData,
 ) {
-    if selected_index < 0 || selected_index != previous_index {
-        return;
-    }
-    if previous_params == params {
-        return;
-    }
-    let Some(material_instance) = assets
-        .material_instances_mut()
-        .get_mut(selected_index as usize)
-    else {
-        return;
-    };
-
     if material_instance.has_parameter("baseColorFactor") {
-        material_instance.set_float4("baseColorFactor", params.base_color_rgba);
+        material_instance.set_float4("baseColorFactor", data.base_color_rgba);
     }
     if material_instance.has_parameter("metallicFactor") {
-        material_instance.set_float("metallicFactor", params.metallic);
+        material_instance.set_float("metallicFactor", data.metallic);
     }
     if material_instance.has_parameter("roughnessFactor") {
-        material_instance.set_float("roughnessFactor", params.roughness);
+        material_instance.set_float("roughnessFactor", data.roughness);
     }
     if material_instance.has_parameter("emissiveFactor") {
-        material_instance.set_float3("emissiveFactor", params.emissive_rgb);
+        material_instance.set_float3("emissiveFactor", data.emissive_rgb);
+    }
+}
+
+fn apply_scene_material_overrides_to_runtime(scene: &SceneState, assets: &mut AssetManager) {
+    if scene.material_overrides().is_empty() {
+        return;
+    }
+    let material_names = assets.material_names().to_vec();
+    for override_entry in scene.material_overrides() {
+        for (index, name) in material_names.iter().enumerate() {
+            if name != &override_entry.material_name {
+                continue;
+            }
+            if let Some(material_instance) = assets.material_instances_mut().get_mut(index) {
+                apply_material_override(material_instance, &override_entry.data);
+            }
+        }
+    }
+}
+
+fn material_params_to_override(params: MaterialParams) -> MaterialOverrideData {
+    MaterialOverrideData {
+        base_color_rgba: params.base_color_rgba,
+        metallic: params.metallic,
+        roughness: params.roughness,
+        emissive_rgb: params.emissive_rgb,
     }
 }
 
