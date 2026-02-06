@@ -1,11 +1,11 @@
 mod input;
 mod timing;
 
-use crate::assets::{AssetManager, DEFAULT_GLTF_PATH};
+use crate::assets::AssetManager;
+use crate::filament::Entity;
 use crate::render::{CameraController, CameraMovement, RenderContext};
 use crate::scene::{
-    compose_transform_matrix, AssetData, DirectionalLightData, EnvironmentData, SceneObject,
-    SceneObjectKind, SceneState,
+    compose_transform_matrix, DirectionalLightData, EnvironmentData, SceneObjectKind, SceneState,
 };
 use crate::ui::{MaterialParams, UiState};
 use input::{InputAction, InputState};
@@ -140,9 +140,7 @@ impl App {
         let mut selected_kind = -1i32;
         let mut light_settings = self.ui.light_settings();
         let mut environment_intensity = self.ui.environment_intensity();
-        let mut hdr_path_initial = String::new();
-        let mut ibl_path_initial = String::new();
-        let mut skybox_path_initial = String::new();
+        let mut selected_light_entity: Option<Entity> = None;
 
         if selected_index >= 0 {
             if let Some(object) = self.scene.objects().get(selected_index as usize) {
@@ -158,13 +156,11 @@ impl App {
                         light_settings.color = data.color;
                         light_settings.intensity = data.intensity;
                         light_settings.direction = data.direction;
+                        selected_light_entity = object.root_entity;
                         1
                     }
                     SceneObjectKind::Environment(data) => {
                         environment_intensity = data.intensity;
-                        hdr_path_initial = data.hdr_path.clone();
-                        ibl_path_initial = data.ibl_path.clone();
-                        skybox_path_initial = data.skybox_path.clone();
                         2
                     }
                 };
@@ -175,7 +171,6 @@ impl App {
         let previous_material_selection = selected_material_index;
         let previous_material_params = material_params;
         let previous_environment_intensity = self.ui.environment_intensity();
-        let mut environment_intensity = self.ui.environment_intensity();
         let mut environment_apply = false;
         let mut environment_generate = false;
         let mut create_gltf = false;
@@ -243,6 +238,9 @@ impl App {
         self.ui.set_environment_intensity(environment_intensity);
 
         if let Some(render) = &mut self.render {
+            if let Some(entity) = selected_light_entity {
+                render.set_light_entity(entity);
+            }
             render.set_directional_light(
                 light_settings.color,
                 light_settings.intensity,
@@ -328,7 +326,12 @@ impl App {
                         environment_intensity,
                     );
                     if ok {
-                        // TODO: Use set_environment with EnvironmentData
+                        self.scene.set_environment(EnvironmentData {
+                            hdr_path: hdr_path_string.clone(),
+                            ibl_path: ibl_path_string.clone(),
+                            skybox_path: skybox_path_string.clone(),
+                            intensity: environment_intensity,
+                        });
                         self.ui
                             .set_environment_status("Environment loaded.".to_string());
                     } else {
@@ -354,95 +357,255 @@ impl App {
                 }
             }
 
-            // Handle Main Menu button actions
-            if create_gltf {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("glTF", &["gltf", "glb"])
-                    .pick_file()
-                {
-                    if let Some(path_str) = path.to_str() {
-                        // Add GLTF to existing scene (don't clear)
-                        let (engine, scene) = render.engine_scene_mut();
-                        let mut entity_manager = engine.entity_manager();
-                        let loaded = self.assets.load_gltf_from_path(
-                            engine,
-                            scene,
+        }
+        if create_gltf {
+            self.handle_create_gltf_action();
+        }
+        if create_light {
+            self.handle_create_light_action();
+        }
+        if create_environment {
+            self.scene.set_environment(EnvironmentData {
+                hdr_path: String::new(),
+                ibl_path: String::new(),
+                skybox_path: String::new(),
+                intensity: 30_000.0,
+            });
+        }
+        if save_scene {
+            self.handle_save_scene_action();
+        }
+        if load_scene {
+            self.handle_load_scene_action();
+        }
+
+        self.timing
+            .update(self.window.as_ref().map(|w| w.as_ref()), frame_start);
+        self.update_camera();
+    }
+
+    fn handle_create_gltf_action(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("glTF", &["gltf", "glb"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(path_str) = path.to_str() else {
+            return;
+        };
+        let Some(render) = &mut self.render else {
+            return;
+        };
+
+        let (engine, scene) = render.engine_scene_mut();
+        let mut entity_manager = engine.entity_manager();
+        log::info!("Loading glTF: {}", path_str);
+        match self
+            .assets
+            .load_gltf_from_path(engine, scene, &mut entity_manager, path_str)
+        {
+            Ok(loaded) => {
+                log::info!(
+                    "Loaded glTF '{}' center={:?} extent={:?}",
+                    path_str,
+                    loaded.center,
+                    loaded.extent
+                );
+                self.scene.add_asset(&loaded, path_str);
+                self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
+                self.camera.apply(render.camera_mut());
+            }
+            Err(err) => {
+                log::warn!("Failed to load glTF {}: {}", path_str, err);
+                self.ui
+                    .set_environment_status(format!("Failed to load glTF:\n{}", err));
+            }
+        }
+    }
+
+    fn handle_create_light_action(&mut self) {
+        let Some(render) = &mut self.render else {
+            return;
+        };
+        let (engine, scene) = render.engine_scene_mut();
+        let mut entity_manager = engine.entity_manager();
+        let light_entity = engine.create_directional_light(
+            &mut entity_manager,
+            [1.0, 1.0, 1.0],
+            100_000.0,
+            [0.0, -1.0, -0.5],
+        );
+        scene.add_entity(light_entity);
+        self.scene.add_directional_light(
+            "Directional Light",
+            light_entity,
+            DirectionalLightData {
+                color: [1.0, 1.0, 1.0],
+                intensity: 100_000.0,
+                direction: [0.0, -1.0, -0.5],
+            },
+        );
+        render.set_light_entity(light_entity);
+    }
+
+    fn handle_save_scene_action(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Scene", &["json"])
+            .set_file_name("scene.json")
+            .save_file()
+        {
+            if let Err(e) = crate::scene::serialization::save_scene_to_file(&self.scene, &path) {
+                log::warn!("Failed to save scene: {}", e);
+            }
+        }
+    }
+
+    fn handle_load_scene_action(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Scene", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        match crate::scene::serialization::load_scene_from_file(&path) {
+            Ok(loaded_scene) => {
+                self.scene = loaded_scene;
+                match self.rebuild_runtime_scene() {
+                    Ok(()) => log::info!("Scene loaded from {:?}", path),
+                    Err(err) => {
+                        log::warn!("Scene loaded with runtime rebuild errors: {}", err);
+                        self.ui
+                            .set_environment_status(format!("Scene load warnings:\n{}", err));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to load scene: {}", e);
+            }
+        }
+    }
+
+    fn rebuild_runtime_scene(&mut self) -> Result<(), String> {
+        let Some(render) = &mut self.render else {
+            return Ok(());
+        };
+
+        render.clear_scene();
+        self.assets.clear();
+
+        let source_objects = self.scene.objects().to_vec();
+        let mut rebuilt_objects = Vec::with_capacity(source_objects.len());
+        let mut transforms_to_apply: Vec<(Entity, [f32; 16])> = Vec::new();
+        let mut first_asset_bounds: Option<([f32; 3], [f32; 3])> = None;
+        let mut active_light: Option<Entity> = None;
+        let mut environment_data: Option<EnvironmentData> = None;
+        let mut errors: Vec<String> = Vec::new();
+
+        {
+            let (engine, scene) = render.engine_scene_mut();
+            let mut entity_manager = engine.entity_manager();
+            log::info!(
+                "Rebuilding runtime scene from {} serialized objects",
+                source_objects.len()
+            );
+            for mut object in source_objects {
+                match object.kind.clone() {
+                    SceneObjectKind::Asset(data) => {
+                        log::info!("Rehydrate asset '{}'", data.path);
+                        match self
+                            .assets
+                            .load_gltf_from_path(engine, scene, &mut entity_manager, &data.path)
+                        {
+                            Ok(loaded) => {
+                                object.root_entity = Some(loaded.root_entity);
+                                object.center = loaded.center;
+                                object.extent = loaded.extent;
+                                transforms_to_apply.push((
+                                    loaded.root_entity,
+                                    compose_transform_matrix(
+                                        data.position,
+                                        data.rotation_deg,
+                                        data.scale,
+                                    ),
+                                ));
+                                if first_asset_bounds.is_none() {
+                                    first_asset_bounds = Some((loaded.center, loaded.extent));
+                                }
+                                rebuilt_objects.push(object);
+                            }
+                            Err(err) => {
+                                errors.push(format!("Asset '{}' failed to load: {}", data.path, err));
+                            }
+                        }
+                    }
+                    SceneObjectKind::DirectionalLight(data) => {
+                        let light_entity = engine.create_directional_light(
                             &mut entity_manager,
-                            path_str,
+                            data.color,
+                            data.intensity,
+                            data.direction,
                         );
-                        self.scene.add_asset(&loaded, path_str);
-                        // Update camera to frame the new asset
-                        self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
-                        self.camera.apply(render.camera_mut());
-                    }
-                }
-            }
-
-            if create_light {
-                let (engine, scene) = render.engine_scene_mut();
-                let mut entity_manager = engine.entity_manager();
-                let light_entity = engine.create_directional_light(
-                    &mut entity_manager,
-                    [1.0, 1.0, 1.0],
-                    100_000.0,
-                    [0.0, -1.0, -0.5],
-                );
-                scene.add_entity(light_entity);
-                self.scene.add_directional_light(
-                    "Directional Light",
-                    light_entity,
-                    DirectionalLightData {
-                        color: [1.0, 1.0, 1.0],
-                        intensity: 100_000.0,
-                        direction: [0.0, -1.0, -0.5],
-                    },
-                );
-                render.set_light_entity(light_entity);
-            }
-
-            if create_environment {
-                self.scene.set_environment(EnvironmentData {
-                    hdr_path: String::new(),
-                    ibl_path: String::new(),
-                    skybox_path: String::new(),
-                    intensity: 30_000.0,
-                });
-            }
-
-            if save_scene {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Scene", &["json"])
-                    .set_file_name("scene.json")
-                    .save_file()
-                {
-                    if let Err(e) =
-                        crate::scene::serialization::save_scene_to_file(&self.scene, &path)
-                    {
-                        log::warn!("Failed to save scene: {}", e);
-                    }
-                }
-            }
-
-            if load_scene {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Scene", &["json"])
-                    .pick_file()
-                {
-                    match crate::scene::serialization::load_scene_from_file(&path) {
-                        Ok(loaded_scene) => {
-                            self.scene = loaded_scene;
-                            log::info!("Scene loaded from {:?}", path);
+                        scene.add_entity(light_entity);
+                        object.root_entity = Some(light_entity);
+                        object.center = [0.0, 0.0, 0.0];
+                        object.extent = [0.0, 0.0, 0.0];
+                        if active_light.is_none() {
+                            active_light = Some(light_entity);
                         }
-                        Err(e) => {
-                            log::warn!("Failed to load scene: {}", e);
-                        }
+                        rebuilt_objects.push(object);
+                    }
+                    SceneObjectKind::Environment(data) => {
+                        object.root_entity = None;
+                        object.center = [0.0, 0.0, 0.0];
+                        object.extent = [0.0, 0.0, 0.0];
+                        environment_data = Some(data);
+                        rebuilt_objects.push(object);
                     }
                 }
             }
         }
-        self.timing
-            .update(self.window.as_ref().map(|w| w.as_ref()), frame_start);
-        self.update_camera();
+
+        self.scene.replace_objects(rebuilt_objects);
+
+        for (entity, matrix) in transforms_to_apply {
+            render.set_entity_transform(entity, matrix);
+        }
+        if let Some(light_entity) = active_light {
+            render.set_light_entity(light_entity);
+        }
+
+        if let Some(environment) = environment_data {
+            let env_ok = render.set_environment(
+                &environment.ibl_path,
+                &environment.skybox_path,
+                environment.intensity,
+            );
+            if env_ok {
+                render.set_environment_intensity(environment.intensity);
+                let (hdr, ibl, sky) = self.ui.environment_paths_mut();
+                write_string_to_buffer(&environment.hdr_path, hdr);
+                write_string_to_buffer(&environment.ibl_path, ibl);
+                write_string_to_buffer(&environment.skybox_path, sky);
+                self.ui.set_environment_intensity(environment.intensity);
+                self.ui
+                    .set_environment_status("Environment loaded.".to_string());
+            } else if !environment.ibl_path.is_empty() || !environment.skybox_path.is_empty() {
+                errors.push("Environment failed to load from scene file.".to_string());
+            }
+        }
+
+        if let Some((center, extent)) = first_asset_bounds {
+            self.camera = CameraController::from_bounds(center, extent);
+            self.camera.apply(render.camera_mut());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
     }
 
     fn map_mouse_button(button: MouseButton) -> Option<i32> {

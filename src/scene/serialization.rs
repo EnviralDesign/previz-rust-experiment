@@ -1,6 +1,4 @@
-use crate::scene::{
-    AssetData, DirectionalLightData, EnvironmentData, SceneObject, SceneObjectKind, SceneState,
-};
+use crate::scene::SceneState;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -27,8 +25,7 @@ pub fn load_scene_from_file(path: &Path) -> Result<SceneState> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::scene::SceneState;
+    use crate::scene::{AssetData, DirectionalLightData, EnvironmentData, SceneObject, SceneObjectKind, SceneState};
 
     #[test]
     fn test_empty_scene_serialization() {
@@ -67,5 +64,44 @@ mod tests {
             }
             _ => panic!("Expected DirectionalLight"),
         }
+    }
+
+    #[test]
+    fn test_runtime_fields_are_not_serialized() {
+        let mut scene = SceneState::new();
+        scene.add_object(SceneObject {
+            name: "Helmet".to_string(),
+            kind: SceneObjectKind::Asset(AssetData {
+                path: "assets/gltf/DamagedHelmet.gltf".to_string(),
+                position: [1.0, 2.0, 3.0],
+                rotation_deg: [10.0, 20.0, 30.0],
+                scale: [1.0, 1.0, 1.0],
+            }),
+            root_entity: None,
+            center: [9.0, 9.0, 9.0],
+            extent: [8.0, 8.0, 8.0],
+        });
+        scene.add_object(SceneObject {
+            name: "Environment".to_string(),
+            kind: SceneObjectKind::Environment(EnvironmentData {
+                hdr_path: "hdr.hdr".to_string(),
+                ibl_path: "ibl.ktx".to_string(),
+                skybox_path: "sky.ktx".to_string(),
+                intensity: 12000.0,
+            }),
+            root_entity: None,
+            center: [1.0, 1.0, 1.0],
+            extent: [2.0, 2.0, 2.0],
+        });
+
+        let json = serde_json::to_string_pretty(&scene).unwrap();
+        assert!(!json.contains("root_entity"));
+        assert!(!json.contains("\"center\""));
+        assert!(!json.contains("\"extent\""));
+
+        let loaded: SceneState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.objects().len(), 2);
+        assert_eq!(loaded.objects()[0].center, [0.0, 0.0, 0.0]);
+        assert_eq!(loaded.objects()[0].extent, [0.0, 0.0, 0.0]);
     }
 }

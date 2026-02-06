@@ -4,8 +4,6 @@ use crate::filament::{
 };
 use std::path::PathBuf;
 
-pub const DEFAULT_GLTF_PATH: &str = "assets/gltf/DamagedHelmet.gltf";
-
 #[derive(Debug, Clone)]
 pub struct LoadedAsset {
     pub name: String,
@@ -20,6 +18,31 @@ pub struct AssetManager {
     loaded_assets: Vec<LoadedAsset>,
     material_instances: Vec<MaterialInstance>,
     material_names: Vec<String>,
+    // glTF providers must outlive loaded assets/material instances.
+    material_provider: Option<GltfMaterialProvider>,
+    texture_provider: Option<GltfTextureProvider>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AssetError {
+    #[error("failed to read glTF at {path}: {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to create glTF material provider")]
+    CreateMaterialProvider,
+    #[error("failed to create glTF texture provider")]
+    CreateTextureProvider,
+    #[error("failed to create glTF asset loader")]
+    CreateAssetLoader,
+    #[error("failed to create glTF resource loader")]
+    CreateResourceLoader,
+    #[error("failed to parse glTF JSON: {path}")]
+    ParseGltf { path: String },
+    #[error("failed to load glTF resources: {path}")]
+    LoadResources { path: String },
 }
 
 impl AssetManager {
@@ -29,6 +52,8 @@ impl AssetManager {
             loaded_assets: Vec::new(),
             material_instances: Vec::new(),
             material_names: Vec::new(),
+            material_provider: None,
+            texture_provider: None,
         }
     }
 
@@ -49,10 +74,10 @@ impl AssetManager {
     }
 
     pub fn clear(&mut self) {
-        self.gltf_assets.clear();
-        self.loaded_assets.clear();
         self.material_instances.clear();
         self.material_names.clear();
+        self.gltf_assets.clear();
+        self.loaded_assets.clear();
     }
 
     pub fn load_gltf_from_path(
@@ -61,26 +86,40 @@ impl AssetManager {
         scene: &mut Scene,
         entity_manager: &mut EntityManager,
         path: &str,
-    ) -> LoadedAsset {
-        let gltf_bytes = load_gltf_bytes(path);
-        let mut material_provider = GltfMaterialProvider::create_jit(engine, false)
-            .expect("Failed to create gltf material provider");
-        let mut texture_provider =
-            GltfTextureProvider::create_stb(engine).expect("Failed to create stb texture provider");
-        let mut asset_loader =
-            GltfAssetLoader::create(engine, &mut material_provider, entity_manager)
-                .expect("Failed to create gltf asset loader");
-        let mut resource_loader = GltfResourceLoader::create(engine, None, true)
-            .expect("Failed to create gltf resource loader");
-        resource_loader.add_texture_provider("image/png", &mut texture_provider);
-        resource_loader.add_texture_provider("image/jpeg", &mut texture_provider);
+    ) -> Result<LoadedAsset, AssetError> {
+        let gltf_bytes = load_gltf_bytes(path)?;
+        if self.material_provider.is_none() {
+            self.material_provider = GltfMaterialProvider::create_jit(engine, false);
+        }
+        if self.texture_provider.is_none() {
+            self.texture_provider = GltfTextureProvider::create_stb(engine);
+        }
+        let material_provider = self
+            .material_provider
+            .as_mut()
+            .ok_or(AssetError::CreateMaterialProvider)?;
+        let texture_provider = self
+            .texture_provider
+            .as_mut()
+            .ok_or(AssetError::CreateTextureProvider)?;
+
+        let mut asset_loader = GltfAssetLoader::create(engine, material_provider, entity_manager)
+            .ok_or(AssetError::CreateAssetLoader)?;
+        let mut resource_loader =
+            GltfResourceLoader::create(engine, None, true).ok_or(AssetError::CreateResourceLoader)?;
+        resource_loader.add_texture_provider("image/png", texture_provider);
+        resource_loader.add_texture_provider("image/jpeg", texture_provider);
 
         let mut asset = asset_loader
             .create_asset_from_json(&gltf_bytes)
-            .expect("Failed to parse gltf");
+            .ok_or_else(|| AssetError::ParseGltf {
+                path: path.to_string(),
+            })?;
         let loaded = resource_loader.load_resources(&mut asset);
         if !loaded {
-            panic!("Failed to load gltf resources");
+            return Err(AssetError::LoadResources {
+                path: path.to_string(),
+            });
         }
         asset.release_source_data();
         asset.add_entities_to_scene(scene);
@@ -105,18 +144,27 @@ impl AssetManager {
         self.material_names.extend(names);
         self.gltf_assets.push(asset);
         self.loaded_assets.push(loaded_asset.clone());
-        loaded_asset
+        Ok(loaded_asset)
     }
 }
 
-fn load_gltf_bytes(path: &str) -> Vec<u8> {
+impl Drop for AssetManager {
+    fn drop(&mut self) {
+        // Ensure material instances are dropped before assets/providers.
+        self.material_instances.clear();
+        self.material_names.clear();
+        self.gltf_assets.clear();
+        self.loaded_assets.clear();
+        self.texture_provider = None;
+        self.material_provider = None;
+    }
+}
+
+fn load_gltf_bytes(path: &str) -> Result<Vec<u8>, AssetError> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let gltf_path = manifest_dir.join(path);
-    std::fs::read(&gltf_path).unwrap_or_else(|err| {
-        panic!(
-            "Failed to read glTF asset at {}: {}",
-            gltf_path.display(),
-            err
-        )
+    std::fs::read(&gltf_path).map_err(|source| AssetError::Read {
+        path: gltf_path.display().to_string(),
+        source,
     })
 }

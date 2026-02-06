@@ -2,97 +2,55 @@
   "objects": [
     {
       "name": "DamagedHelmet.gltf",
-      "kind": "Asset",
-      "center": [
-        -0.0024815798,
-        0.00001052022,
-        -0.18715495
-      ],
-      "extent": [
-        0.944977,
-        0.90098464,
-        1.0000002
-      ],
-      "root_entity": {
-        "id": 263
-      },
-      "position": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "rotation_deg": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "scale": [
-        1.0,
-        1.0,
-        1.0
-      ]
+      "kind": {
+        "Asset": {
+          "path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
+          "position": [
+            0.0,
+            0.25,
+            0.0
+          ],
+          "rotation_deg": [
+            30.0,
+            45.0,
+            20.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      }
     },
     {
       "name": "Directional Light",
-      "kind": "DirectionalLight",
-      "center": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "extent": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "root_entity": {
-        "id": 266
-      },
-      "position": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "rotation_deg": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "scale": [
-        1.0,
-        1.0,
-        1.0
-      ]
+      "kind": {
+        "DirectionalLight": {
+          "color": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "intensity": 156888.9,
+          "direction": [
+            -1.0,
+            -1.0,
+            -0.5
+          ]
+        }
+      }
     },
     {
       "name": "Environment",
-      "kind": "Environment",
-      "center": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "extent": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "root_entity": null,
-      "position": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "rotation_deg": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "scale": [
-        1.0,
-        1.0,
-        1.0
-      ]
+      "kind": {
+        "Environment": {
+          "hdr_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace.hdr",
+          "ibl_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace_ibl.ktx",
+          "skybox_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace_skybox.ktx",
+          "intensity": 42444.4
+        }
+      }
     }
   ]
 }

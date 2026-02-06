@@ -82,10 +82,6 @@ impl RenderContext {
         &mut self.camera
     }
 
-    pub fn light_entity(&self) -> Option<Entity> {
-        self.light_entity
-    }
-
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
         self.view
             .set_viewport(0, 0, new_size.width, new_size.height);

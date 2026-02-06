@@ -52,16 +52,6 @@ pub enum SceneObjectKind {
     Environment(EnvironmentData),
 }
 
-impl SceneObjectKind {
-    pub fn discriminant(&self) -> &'static str {
-        match self {
-            SceneObjectKind::Asset(_) => "Asset",
-            SceneObjectKind::DirectionalLight(_) => "DirectionalLight",
-            SceneObjectKind::Environment(_) => "Environment",
-        }
-    }
-}
-
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct SceneState {
     objects: Vec<SceneObject>,
@@ -144,22 +134,13 @@ impl SceneState {
         }
     }
 
-    pub fn remove_environment(&mut self) {
-        let index = self
-            .objects
-            .iter()
-            .position(|object| matches!(object.kind, SceneObjectKind::Environment(_)));
-        if let Some(idx) = index {
-            self.objects.remove(idx);
-        }
-    }
-
+    #[cfg(test)]
     pub fn add_object(&mut self, object: SceneObject) {
         self.objects.push(object);
     }
 
-    pub fn clear(&mut self) {
-        self.objects.clear();
+    pub fn replace_objects(&mut self, objects: Vec<SceneObject>) {
+        self.objects = objects;
     }
 }
 

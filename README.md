@@ -1,82 +1,66 @@
-# Previz - Filament Renderer Proof of Concept
+# Previz
 
-A minimal Rust application demonstrating Google Filament renderer integration on Windows.
+Previz is a Windows-native Filament-based scene tool focused on robust scene authoring and portable playback bundles.
 
-## Overview
+Current priorities:
+- stable scene composition (assets, lights, environment, material tweaks)
+- reliable save/load with runtime rehydration
+- architecture that supports a simplified creative-facing runtime later
 
-This is a "hello world" proof of concept that:
-- Creates a native Windows window using `winit`
-- Initializes the Filament rendering engine with OpenGL backend
-- Loads and renders a glTF model with a directional light
+## Current State
+
+Implemented now:
+- custom Filament FFI bridge (C++ wrapper + Rust wrappers)
+- glTF import via `gltfio`
+- directional light and environment workflows (including HDR -> KTX generation)
+- material parameter editing for loaded glTF material instances
+- scene JSON serialization with runtime handle rebuild on load
+- build pipeline split into maintainable support files in `build_support/`
+
+## Vision
+
+The project is moving toward two related products:
+1. Authoring tool for technical setup and scene rigging.
+2. Portable runtime bundle (zip + exe + assets + scene config) for creative operators.
+
+Design principle:
+- keep core runtime flexible and unopinionated
+- keep creative-facing controls intentionally small
+
+## Documentation
+
+- `docs/V0_2_ARCHITECTURE.md`: active architecture and implementation plan for both of us.
+- `SUMMARY_AND_NEXT_STEPS.md`: legacy integration notes retained for historical context.
 
 ## Prerequisites
 
-- Rust 1.75+ (stable)
 - Windows 10/11 (x64)
-- Visual Studio Build Tools (for linking)
+- Rust 1.75+
+- Visual Studio Build Tools (MSVC toolchain)
 
-## Building
-
-```bash
-cargo build
-```
-
-The first build will take a while as it downloads the prebuilt Filament binaries (~700MB).
-
-## Running
+## Build and Run
 
 ```bash
+cargo check
 cargo run
 ```
 
-You should see a window rendering the DamagedHelmet glTF with a directional light.
+First build may download Filament binaries and compile native dependencies.
 
-Press **ESC** or close the window to exit.
+## Project Layout
 
-## Project Structure
-
-```
-previz-rust-experiment/
-├── Cargo.toml           # Dependencies and project config
-├── src/
-│   └── main.rs          # Main application code
-└── assets/
-    ├── bakedColor.mat           # Material source compiled at build time
-    └── gltf/
-        └── DamagedHelmet.gltf   # Sample glTF asset (embedded data URIs)
+```text
+build.rs                    Build orchestration for Filament + filagui + bindings
+build_support/bindings.cpp  C++ C-ABI wrapper source used by build.rs
+build_support/bindings.rs   Rust FFI declarations emitted to OUT_DIR
+src/app/                    App loop, UI action handling, scene/runtime coordination
+src/render/                 Render context and camera helpers
+src/assets/                 Asset loading and lifetime management
+src/scene/                  Serializable scene model and IO
+src/filament.rs             Safe-ish Rust wrappers over raw FFI
 ```
 
-## Technical Notes
+## Notes
 
-### Why custom bindings?
-We use a small C++ wrapper and manually authored Rust FFI for Filament v1.69.0.
-Filament headers are too complex for `bindgen` due to extensive templates/C++20 usage.
-
-### API Safety
-All Filament operations are marked `unsafe` because:
-- Filament C++ objects don't use reference counting
-- Resources must be manually released
-- Memory management is explicit
-
-### Material Files
-Filament uses pre-compiled materials (`.filamat` files). We keep the source
-material in `assets/bakedColor.mat` and compile it during the build using
-Filament's `matc` tool from the downloaded release.
-
-## Next Steps
-
-This POC sets the foundation for:
-1. Loading 3D models (using Filament's `gltfio`)
-2. Adding lighting (sun lights, IBL)
-3. Creating custom materials
-4. Building a full application/UI framework
-
-## Resources
-
-- [Google Filament GitHub](https://github.com/google/filament)
-- [Filament Documentation](https://google.github.io/filament/)
-- [Filament Materials Guide](https://google.github.io/filament/Materials.html)
-
-## License
-
-This POC is open source. Filament is licensed under Apache 2.0.
+- Filament is C++ and non-reference-counted; object lifetime and drop ordering are critical.
+- This project intentionally uses manual FFI boundaries instead of `bindgen` for stability with Filament's C++ API.
