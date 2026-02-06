@@ -31,6 +31,7 @@ serde_json = "1.0"
 # Error handling
 thiserror = "1.0"
 sha2 = "0.10"
+image = "0.25"
 
 # File dialogs
 rfd = "0.14"

@@ -1337,16 +1337,20 @@ void filagui_imgui_helper_render_scene_ui(
                 );
             }
             if (material_texture_source && material_texture_source_capacity > 0) {
+                float button_w = 32.0f;
+                float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+                ImGui::SetNextItemWidth(-button_w - spacing);
                 ImGui::InputText(
                     "Texture Source",
                     material_texture_source,
                     (size_t)material_texture_source_capacity
                 );
-            }
-            if (material_pick_texture) {
-                *material_pick_texture = false;
-                if (ImGui::Button("Pick Texture...", ImVec2(-1, 0))) {
-                    *material_pick_texture = true;
+                if (material_pick_texture) {
+                    ImGui::SameLine();
+                    *material_pick_texture = false;
+                    if (ImGui::Button("...", ImVec2(button_w, 0))) {
+                        *material_pick_texture = true;
+                    }
                 }
             }
             if (material_apply_texture) {

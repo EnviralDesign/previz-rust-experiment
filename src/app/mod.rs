@@ -614,27 +614,31 @@ impl App {
             let result = self.execute_scene_command(command);
             self.apply_command_feedback("Failed to update material parameters", result);
         }
+        let mut picked_texture_path: Option<String> = None;
         if material_pick_texture {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Texture", &["ktx", "png", "jpg", "jpeg"])
                 .pick_file()
             {
                 if let Some(path_string) = path.to_str() {
+                    picked_texture_path = Some(path_string.to_string());
                     let (_param_buf, source_buf) = self.ui.material_texture_binding_mut();
                     write_string_to_buffer(path_string, source_buf);
                 }
             }
         }
-        if material_apply_texture {
+        if material_apply_texture || picked_texture_path.is_some() {
             if selected_material_global_index >= 0 {
                 if let Some(binding) = self
                     .assets
                     .material_binding(selected_material_global_index as usize)
                     .cloned()
                 {
+                    let effective_source =
+                        picked_texture_path.as_deref().unwrap_or(&material_texture_source_string);
                     match prepare_texture_binding_data(
                         &material_texture_param_string,
-                        &material_texture_source_string,
+                        effective_source,
                     ) {
                         Ok(texture_binding) => {
                             let result = self.execute_scene_command(
@@ -1705,13 +1709,14 @@ fn resolve_runtime_texture_cache(source_path: &str) -> Result<(String, String), 
         .map_err(|err| format!("Failed to create texture cache folder: {}", err))?;
     let ktx_path = cache_dir.join(format!("{source_hash}.ktx"));
     if !ktx_path.exists() {
+        let normalized_png_path = ensure_normalized_png_for_mipgen(&source, &cache_dir, &source_hash)?;
         let mipgen_path = PathBuf::from(env!("FILAMENT_BIN_DIR")).join("mipgen.exe");
         if !mipgen_path.exists() {
             return Err(format!("mipgen not found at {}", mipgen_path.display()));
         }
         let status = Command::new(&mipgen_path)
             .args(["-q", "-f", "ktx"])
-            .arg(&source)
+            .arg(&normalized_png_path)
             .arg(&ktx_path)
             .status()
             .map_err(|err| format!("Failed to run mipgen: {}", err))?;
@@ -1720,6 +1725,32 @@ fn resolve_runtime_texture_cache(source_path: &str) -> Result<(String, String), 
         }
     }
     Ok((display_path_for_scene(&ktx_path), source_hash))
+}
+
+fn ensure_normalized_png_for_mipgen(
+    source: &std::path::Path,
+    cache_dir: &std::path::Path,
+    source_hash: &str,
+) -> Result<PathBuf, String> {
+    let normalized_png_path = cache_dir.join(format!("{source_hash}.normalized.png"));
+    if normalized_png_path.exists() {
+        return Ok(normalized_png_path);
+    }
+    let image = image::ImageReader::open(source)
+        .map_err(|err| format!("Failed to open source image '{}': {}", source.display(), err))?
+        .decode()
+        .map_err(|err| format!("Failed to decode source image '{}': {}", source.display(), err))?;
+    image
+        .to_rgba8()
+        .save_with_format(&normalized_png_path, image::ImageFormat::Png)
+        .map_err(|err| {
+            format!(
+                "Failed to write normalized PNG '{}': {}",
+                normalized_png_path.display(),
+                err
+            )
+        })?;
+    Ok(normalized_png_path)
 }
 
 fn resolve_path_for_read(path: &str) -> Result<PathBuf, String> {
