@@ -15,8 +15,10 @@ pub struct LoadedAsset {
 pub struct AssetManager {
     // Store all loaded assets to keep them alive (prevent Drop from destroying entities)
     gltf_assets: Vec<GltfAsset>,
+    retired_gltf_assets: Vec<GltfAsset>,
     loaded_assets: Vec<LoadedAsset>,
     material_instances: Vec<MaterialInstance>,
+    retired_material_instances: Vec<MaterialInstance>,
     material_names: Vec<String>,
     // glTF providers must outlive loaded assets/material instances.
     material_provider: Option<GltfMaterialProvider>,
@@ -49,8 +51,10 @@ impl AssetManager {
     pub fn new() -> Self {
         Self {
             gltf_assets: Vec::new(),
+            retired_gltf_assets: Vec::new(),
             loaded_assets: Vec::new(),
             material_instances: Vec::new(),
+            retired_material_instances: Vec::new(),
             material_names: Vec::new(),
             material_provider: None,
             texture_provider: None,
@@ -73,11 +77,14 @@ impl AssetManager {
         &self.material_names
     }
 
-    pub fn clear(&mut self) {
-        self.material_instances.clear();
-        self.material_names.clear();
-        self.gltf_assets.clear();
+    /// Prepare for scene rebuild without dropping native glTF/material resources mid-frame.
+    /// Old resources are retained until full teardown.
+    pub fn prepare_for_scene_rebuild(&mut self) {
+        self.retired_material_instances
+            .append(&mut self.material_instances);
+        self.retired_gltf_assets.append(&mut self.gltf_assets);
         self.loaded_assets.clear();
+        self.material_names.clear();
     }
 
     pub fn load_gltf_from_path(
@@ -152,8 +159,10 @@ impl Drop for AssetManager {
     fn drop(&mut self) {
         // Ensure material instances are dropped before assets/providers.
         self.material_instances.clear();
+        self.retired_material_instances.clear();
         self.material_names.clear();
         self.gltf_assets.clear();
+        self.retired_gltf_assets.clear();
         self.loaded_assets.clear();
         self.texture_provider = None;
         self.material_provider = None;

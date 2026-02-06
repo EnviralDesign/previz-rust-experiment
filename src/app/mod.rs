@@ -3,13 +3,13 @@ mod timing;
 
 use crate::assets::AssetManager;
 use crate::filament::Entity;
-use crate::render::{CameraController, CameraMovement, RenderContext};
+use crate::render::{CameraController, CameraMovement, RenderContext, RenderError};
 use crate::scene::{
     compose_transform_matrix, DirectionalLightData, EnvironmentData, RuntimeObject, SceneObjectKind,
     SceneRuntime, SceneState,
 };
 use crate::ui::{MaterialParams, UiState};
-use input::{InputAction, InputState};
+use input::InputState;
 use timing::FrameTiming;
 
 use std::ffi::CString;
@@ -26,13 +26,75 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 enum SceneCommand {
     AddAsset { path: String },
+    AddDirectionalLight {
+        name: String,
+        data: DirectionalLightData,
+    },
+    UpdateDirectionalLight {
+        index: usize,
+        data: DirectionalLightData,
+    },
+    SetEnvironment {
+        data: EnvironmentData,
+        apply_runtime: bool,
+    },
+    TransformNode {
+        index: usize,
+        position: [f32; 3],
+        rotation_deg: [f32; 3],
+        scale: [f32; 3],
+    },
     SaveScene { path: PathBuf },
     LoadScene { path: PathBuf },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraDragMode {
+    Orbit,
+    Pan,
+    Dolly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraControlProfile {
+    Blender,
+    #[allow(dead_code)]
+    FpsLike,
+}
+
+enum CommandSeverity {
+    Info,
+    Warning,
+}
+
+struct CommandNotice {
+    severity: CommandSeverity,
+    message: String,
+}
+
 enum CommandOutcome {
     None,
-    Message(String),
+    Notice(CommandNotice),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CommandError {
+    #[error("render context not initialized")]
+    RenderNotInitialized,
+    #[error(transparent)]
+    Asset(#[from] crate::assets::AssetError),
+    #[error(transparent)]
+    SceneIo(#[from] crate::scene::serialization::SerializationError),
+    #[error("environment load failed: provide KTX paths or generate from HDR")]
+    EnvironmentPathsMissing,
+    #[error("environment load failed for IBL '{ibl}' and skybox '{skybox}' (check file paths)")]
+    EnvironmentLoadFailed { ibl: String, skybox: String },
+    #[error("scene object at index {index} not found")]
+    SceneObjectNotFound { index: usize },
+    #[error("scene object at index {index} is not transformable")]
+    SceneObjectNotTransformable { index: usize },
+    #[error("scene object at index {index} is not a directional light")]
+    SceneObjectNotDirectionalLight { index: usize },
 }
 
 pub struct App {
@@ -40,11 +102,15 @@ pub struct App {
     assets: AssetManager,
     scene: SceneState,
     scene_runtime: SceneRuntime,
+    selection: Option<usize>,
     ui: UiState,
     input: InputState,
     modifiers: Modifiers,
     mouse_pos: Option<(f32, f32)>,
     mouse_buttons: [bool; 5],
+    camera_drag_mode: Option<CameraDragMode>,
+    camera_control_profile: CameraControlProfile,
+    orbit_pivot: [f32; 3],
     window_focused: bool,
     camera: CameraController,
     timing: FrameTiming,
@@ -61,11 +127,15 @@ impl App {
             assets: AssetManager::new(),
             scene: SceneState::new(),
             scene_runtime: SceneRuntime::new(),
+            selection: None,
             ui: UiState::new(),
             input: InputState::default(),
             modifiers: Modifiers::default(),
             mouse_pos: None,
             mouse_buttons: [false; 5],
+            camera_drag_mode: None,
+            camera_control_profile: CameraControlProfile::Blender,
+            orbit_pivot: [0.0, 0.0, 0.0],
             window_focused: true,
             camera: CameraController::new([0.0, 0.0, 3.0], 0.6, 0.3),
             timing: FrameTiming::new("Previz - Filament v1.69.0 glTF".to_string()),
@@ -76,16 +146,18 @@ impl App {
         }
     }
 
-    fn init_filament(&mut self, window: &Window) {
-        let mut render = RenderContext::new(window);
+    fn init_filament(&mut self, window: &Window) -> Result<(), RenderError> {
+        let mut render = RenderContext::new(window)?;
 
         // Start with empty scene - no default objects
         self.camera = CameraController::new([0.0, 0.0, 5.0], 0.0, 0.0);
+        self.orbit_pivot = [0.0, 0.0, 0.0];
         render.set_projection_for_window(window);
         self.camera.apply(render.camera_mut());
-        render.init_ui(window);
+        render.init_ui(window)?;
 
         self.render = Some(render);
+        Ok(())
     }
 
     fn handle_resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
@@ -122,9 +194,99 @@ impl App {
             aim_down: self.input.aim_down,
         };
         if self.camera.update_movement(&movement, self.timing.frame_dt) {
-            if let Some(render) = &mut self.render {
-                self.camera.apply(render.camera_mut());
-            }
+            self.apply_camera_to_render();
+        }
+    }
+
+    fn sanitize_camera_state(&mut self) {
+        let valid_position = self
+            .camera
+            .position
+            .iter()
+            .all(|value| value.is_finite() && value.abs() < 1_000_000.0);
+        let valid_angles = self.camera.yaw.is_finite() && self.camera.pitch.is_finite();
+        if !(valid_position && valid_angles) {
+            log::warn!("Camera state invalid; resetting to safe defaults.");
+            self.camera = CameraController::new([0.0, 0.0, 5.0], 0.0, 0.0);
+        }
+    }
+
+    fn apply_camera_to_render(&mut self) {
+        self.sanitize_camera_state();
+        if let Some(render) = &mut self.render {
+            self.camera.apply(render.camera_mut());
+        }
+    }
+
+    fn nudge_camera(&mut self, yaw_delta: f32, pitch_delta: f32, zoom_delta: f32) {
+        self.camera.nudge(yaw_delta, pitch_delta, zoom_delta);
+        self.apply_camera_to_render();
+    }
+
+    fn orbit_camera(&mut self, dx: f32, dy: f32) {
+        let orbit_speed = 0.008;
+        self.camera
+            .orbit_around(self.orbit_pivot, dx * orbit_speed, -dy * orbit_speed);
+        self.apply_camera_to_render();
+    }
+
+    fn pan_camera(&mut self, dx: f32, dy: f32) {
+        let pan_speed = 0.004;
+        let right_amount = -dx * pan_speed;
+        let up_amount = dy * pan_speed;
+        let (_forward_dir, right_dir, up_dir) = self.camera.basis();
+        let delta = [
+            right_dir[0] * right_amount + up_dir[0] * up_amount,
+            right_dir[1] * right_amount + up_dir[1] * up_amount,
+            right_dir[2] * right_amount + up_dir[2] * up_amount,
+        ];
+        self.camera.position[0] += delta[0];
+        self.camera.position[1] += delta[1];
+        self.camera.position[2] += delta[2];
+        self.orbit_pivot[0] += delta[0];
+        self.orbit_pivot[1] += delta[1];
+        self.orbit_pivot[2] += delta[2];
+        self.apply_camera_to_render();
+    }
+
+    fn dolly_camera(&mut self, delta: f32) {
+        self.nudge_camera(0.0, 0.0, delta);
+    }
+
+    fn focus_selected(&mut self) -> bool {
+        let Some(selected) = self.selection else {
+            return false;
+        };
+        let Some(runtime) = self.scene_runtime.get(selected) else {
+            return false;
+        };
+
+        let extent = runtime.extent;
+        if extent[0] <= 0.0 && extent[1] <= 0.0 && extent[2] <= 0.0 {
+            return false;
+        }
+        self.orbit_pivot = runtime.center;
+        self.camera
+            .frame_bounds_preserve_orientation(runtime.center, extent);
+        self.apply_camera_to_render();
+        true
+    }
+
+    fn selection_to_ui_index(selection: Option<usize>) -> i32 {
+        selection
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(-1)
+    }
+
+    fn normalize_selection(raw_index: i32, len: usize) -> Option<usize> {
+        if raw_index < 0 {
+            return None;
+        }
+        let index = usize::try_from(raw_index).ok()?;
+        if index < len {
+            Some(index)
+        } else {
+            None
         }
     }
 
@@ -146,7 +308,7 @@ impl App {
                 CString::new(name.as_str()).unwrap_or_else(|_| CString::new("Material").unwrap())
             })
             .collect();
-        let mut selected_index = self.ui.selected_index();
+        let mut selected_index = Self::selection_to_ui_index(self.selection);
         let mut position = [0.0f32; 3];
         let mut rotation = [0.0f32; 3];
         let mut scale = [1.0f32; 3];
@@ -155,29 +317,35 @@ impl App {
         let mut light_settings = self.ui.light_settings();
         let mut environment_intensity = self.ui.environment_intensity();
         let mut selected_light_entity: Option<Entity> = None;
+        let mut original_asset_transform: Option<([f32; 3], [f32; 3], [f32; 3])> = None;
+        let mut original_light_data: Option<DirectionalLightData> = None;
+        let mut original_environment_data: Option<EnvironmentData> = None;
 
-        if selected_index >= 0 {
-            if let Some(object) = self.scene.objects().get(selected_index as usize) {
+        if let Some(selected) = Self::normalize_selection(selected_index, self.scene.objects().len()) {
+            if let Some(object) = self.scene.objects().get(selected) {
                 can_edit_transform = matches!(object.kind, SceneObjectKind::Asset(_));
                 selected_kind = match &object.kind {
                     SceneObjectKind::Asset(data) => {
                         position = data.position;
                         rotation = data.rotation_deg;
                         scale = data.scale;
+                        original_asset_transform = Some((data.position, data.rotation_deg, data.scale));
                         0
                     }
                     SceneObjectKind::DirectionalLight(data) => {
                         light_settings.color = data.color;
                         light_settings.intensity = data.intensity;
                         light_settings.direction = data.direction;
+                        original_light_data = Some(data.clone());
                         selected_light_entity = self
                             .scene_runtime
-                            .get(selected_index as usize)
+                            .get(selected)
                             .and_then(|runtime| runtime.root_entity);
                         1
                     }
                     SceneObjectKind::Environment(data) => {
                         environment_intensity = data.intensity;
+                        original_environment_data = Some(data.clone());
                         2
                     }
                 };
@@ -195,6 +363,9 @@ impl App {
         let mut create_environment = false;
         let mut save_scene = false;
         let mut load_scene = false;
+        let mut pending_transform_command: Option<SceneCommand> = None;
+        let mut pending_update_light_command: Option<SceneCommand> = None;
+        let mut pending_update_environment_command: Option<SceneCommand> = None;
         let (hdr_path_string, ibl_path_string, skybox_path_string) = {
             let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
@@ -247,68 +418,74 @@ impl App {
                 buffer_to_string(skybox_path),
             )
         };
-        let previous_selection = self.ui.selected_index();
+        let previous_selection = self.selection;
+        self.selection = Self::normalize_selection(selected_index, self.scene.objects().len());
+        selected_index = Self::selection_to_ui_index(self.selection);
         self.ui.set_selected_index(selected_index);
         self.ui.set_light_settings(light_settings);
         self.ui.set_selected_material_index(selected_material_index);
         self.ui.set_material_params(material_params);
         self.ui.set_environment_intensity(environment_intensity);
+        let selected_runtime_entity = self
+            .selection
+            .and_then(|index| self.scene_runtime.get(index))
+            .and_then(|runtime| runtime.root_entity);
 
         if let Some(render) = &mut self.render {
+            render.set_selected_entity(selected_runtime_entity);
             if let Some(entity) = selected_light_entity {
                 render.set_light_entity(entity);
+                render.set_directional_light(
+                    light_settings.color,
+                    light_settings.intensity,
+                    light_settings.direction,
+                );
             }
-            render.set_directional_light(
-                light_settings.color,
-                light_settings.intensity,
-                light_settings.direction,
-            );
-
-            // Save edited data back to SceneObject
-            if selected_index == previous_selection && selected_index >= 0 {
-                if let Some(object) = self.scene.object_mut(selected_index as usize) {
-                    match &mut object.kind {
-                        SceneObjectKind::Asset(data) => {
-                            if can_edit_transform {
-                                let mut changed = false;
-                                if data.position != position {
-                                    data.position = position;
-                                    changed = true;
-                                }
-                                if data.rotation_deg != rotation {
-                                    data.rotation_deg = rotation;
-                                    changed = true;
-                                }
-                                if data.scale != scale {
-                                    data.scale = scale;
-                                    changed = true;
-                                }
-                                if changed {
-                                    if let Some(entity) = self
-                                        .scene_runtime
-                                        .get(selected_index as usize)
-                                        .and_then(|runtime| runtime.root_entity)
-                                    {
-                                        let matrix = compose_transform_matrix(
-                                            data.position,
-                                            data.rotation_deg,
-                                            data.scale,
-                                        );
-                                        render.set_entity_transform(entity, matrix);
-                                    }
-                                }
+            if self.selection == previous_selection {
+                if let Some(selected) = self.selection {
+                    if can_edit_transform {
+                        if let Some((old_position, old_rotation, old_scale)) = original_asset_transform
+                        {
+                            if old_position != position
+                                || old_rotation != rotation
+                                || old_scale != scale
+                            {
+                                pending_transform_command = Some(SceneCommand::TransformNode {
+                                    index: selected,
+                                    position,
+                                    rotation_deg: rotation,
+                                    scale,
+                                });
                             }
                         }
-                        SceneObjectKind::DirectionalLight(data) => {
-                            data.color = light_settings.color;
-                            data.intensity = light_settings.intensity;
-                            data.direction = light_settings.direction;
+                    }
+
+                    if let Some(old_light) = &original_light_data {
+                        let new_light = DirectionalLightData {
+                            color: light_settings.color,
+                            intensity: light_settings.intensity,
+                            direction: light_settings.direction,
+                        };
+                        if old_light != &new_light {
+                            pending_update_light_command = Some(SceneCommand::UpdateDirectionalLight {
+                                index: selected,
+                                data: new_light,
+                            });
                         }
-                        SceneObjectKind::Environment(data) => {
-                            data.intensity = environment_intensity;
-                            data.hdr_path = hdr_path_string.clone();
-                            data.ibl_path = ibl_path_string.clone();
-                            data.skybox_path = skybox_path_string.clone();
+                    }
+
+                    if let Some(old_environment) = &original_environment_data {
+                        let new_environment = EnvironmentData {
+                            hdr_path: hdr_path_string.clone(),
+                            ibl_path: ibl_path_string.clone(),
+                            skybox_path: skybox_path_string.clone(),
+                            intensity: environment_intensity,
+                        };
+                        if old_environment != &new_environment {
+                            pending_update_environment_command = Some(SceneCommand::SetEnvironment {
+                                data: new_environment,
+                                apply_runtime: false,
+                            });
                         }
                     }
                 }
@@ -334,35 +511,6 @@ impl App {
                     }
                 }
             }
-            if environment_apply {
-                if ibl_path_string.is_empty() && skybox_path_string.is_empty() {
-                    self.ui.set_environment_status(
-                        "Environment load failed: provide KTX paths or generate from HDR."
-                            .to_string(),
-                    );
-                } else {
-                    let ok = render.set_environment(
-                        &ibl_path_string,
-                        &skybox_path_string,
-                        environment_intensity,
-                    );
-                    if ok {
-                        self.scene.set_environment(EnvironmentData {
-                            hdr_path: hdr_path_string.clone(),
-                            ibl_path: ibl_path_string.clone(),
-                            skybox_path: skybox_path_string.clone(),
-                            intensity: environment_intensity,
-                        });
-                        self.ui
-                            .set_environment_status("Environment loaded.".to_string());
-                    } else {
-                        self.ui.set_environment_status(format!(
-                            "Environment load failed for:\nIBL: {}\nSkybox: {}",
-                            ibl_path_string, skybox_path_string
-                        ));
-                    }
-                }
-            }
             apply_material_changes(
                 &mut self.assets,
                 selected_material_index,
@@ -379,6 +527,33 @@ impl App {
             }
 
         }
+        if let Some(command) = pending_transform_command {
+            let result = self.execute_scene_command(command);
+            self.apply_command_feedback("Failed to transform node", result);
+        }
+        if let Some(command) = pending_update_light_command {
+            let result = self.execute_scene_command(command);
+            self.apply_command_feedback("Failed to update directional light", result);
+        }
+        if let Some(command) = pending_update_environment_command {
+            let result = self.execute_scene_command(command);
+            self.apply_command_feedback("Failed to update environment", result);
+        }
+        if environment_apply {
+            let result = self.execute_scene_command(SceneCommand::SetEnvironment {
+                data: EnvironmentData {
+                    hdr_path: hdr_path_string.clone(),
+                    ibl_path: ibl_path_string.clone(),
+                    skybox_path: skybox_path_string.clone(),
+                    intensity: environment_intensity,
+                },
+                apply_runtime: true,
+            });
+            self.apply_command_feedback(
+                "Failed to apply environment",
+                result,
+            );
+        }
         if create_gltf {
             self.handle_create_gltf_action();
         }
@@ -386,20 +561,19 @@ impl App {
             self.handle_create_light_action();
         }
         if create_environment {
-            let had_environment = self
-                .scene
-                .objects()
-                .iter()
-                .any(|object| matches!(object.kind, SceneObjectKind::Environment(_)));
-            self.scene.set_environment(EnvironmentData {
-                hdr_path: String::new(),
-                ibl_path: String::new(),
-                skybox_path: String::new(),
-                intensity: 30_000.0,
+            let result = self.execute_scene_command(SceneCommand::SetEnvironment {
+                data: EnvironmentData {
+                    hdr_path: String::new(),
+                    ibl_path: String::new(),
+                    skybox_path: String::new(),
+                    intensity: 30_000.0,
+                },
+                apply_runtime: false,
             });
-            if !had_environment {
-                self.scene_runtime.push(RuntimeObject::default());
-            }
+            self.apply_command_feedback(
+                "Failed to initialize environment object",
+                result,
+            );
         }
         if save_scene {
             self.handle_save_scene_action();
@@ -413,6 +587,250 @@ impl App {
         self.update_camera();
     }
 
+    fn execute_scene_command(&mut self, command: SceneCommand) -> Result<CommandOutcome, CommandError> {
+        match command {
+            SceneCommand::AddAsset { path } => self.command_add_asset(&path),
+            SceneCommand::AddDirectionalLight { name, data } => {
+                self.command_add_directional_light(&name, data)
+            }
+            SceneCommand::UpdateDirectionalLight { index, data } => {
+                self.command_update_directional_light(index, data)
+            }
+            SceneCommand::SetEnvironment {
+                data,
+                apply_runtime,
+            } => self.command_set_environment(data, apply_runtime),
+            SceneCommand::TransformNode {
+                index,
+                position,
+                rotation_deg,
+                scale,
+            } => self.command_transform_node(index, position, rotation_deg, scale),
+            SceneCommand::SaveScene { path } => self.command_save_scene(&path),
+            SceneCommand::LoadScene { path } => self.command_load_scene(&path),
+        }
+    }
+
+    fn apply_command_feedback(
+        &mut self,
+        context: &str,
+        result: Result<CommandOutcome, CommandError>,
+    ) {
+        match result {
+            Ok(CommandOutcome::None) => {}
+            Ok(CommandOutcome::Notice(notice)) => {
+                match notice.severity {
+                    CommandSeverity::Info => log::info!("{}", notice.message),
+                    CommandSeverity::Warning => log::warn!("{}", notice.message),
+                }
+                self.ui.set_environment_status(notice.message);
+            }
+            Err(err) => {
+                log::warn!("{}: {}", context, err);
+                self.ui
+                    .set_environment_status(format!("{}:\n{}", context, err));
+            }
+        }
+    }
+
+    fn command_add_asset(&mut self, path: &str) -> Result<CommandOutcome, CommandError> {
+        let Some(render) = &mut self.render else {
+            return Err(CommandError::RenderNotInitialized);
+        };
+
+        let (engine, scene) = render.engine_scene_mut();
+        let mut entity_manager = engine.entity_manager();
+        log::info!("Loading glTF: {}", path);
+        let loaded = self
+            .assets
+            .load_gltf_from_path(engine, scene, &mut entity_manager, path)
+            ?;
+
+        log::info!(
+            "Loaded glTF '{}' center={:?} extent={:?}",
+            path,
+            loaded.center,
+            loaded.extent
+        );
+        self.scene.add_asset(loaded.name.clone(), path);
+        self.scene_runtime.push(RuntimeObject {
+            root_entity: Some(loaded.root_entity),
+            center: loaded.center,
+            extent: loaded.extent,
+        });
+        self.orbit_pivot = loaded.center;
+        self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
+        self.camera.apply(render.camera_mut());
+
+        Ok(CommandOutcome::None)
+    }
+
+    fn command_add_directional_light(
+        &mut self,
+        name: &str,
+        data: DirectionalLightData,
+    ) -> Result<CommandOutcome, CommandError> {
+        let Some(render) = &mut self.render else {
+            return Err(CommandError::RenderNotInitialized);
+        };
+        let (engine, scene) = render.engine_scene_mut();
+        let mut entity_manager = engine.entity_manager();
+        let light_entity = engine.create_directional_light(
+            &mut entity_manager,
+            data.color,
+            data.intensity,
+            data.direction,
+        );
+        scene.add_entity(light_entity);
+        self.scene.add_directional_light(name, data);
+        self.scene_runtime.push(RuntimeObject {
+            root_entity: Some(light_entity),
+            center: [0.0, 0.0, 0.0],
+            extent: [0.0, 0.0, 0.0],
+        });
+        render.set_light_entity(light_entity);
+
+        Ok(CommandOutcome::None)
+    }
+
+    fn command_update_directional_light(
+        &mut self,
+        index: usize,
+        data: DirectionalLightData,
+    ) -> Result<CommandOutcome, CommandError> {
+        let object = self
+            .scene
+            .object_mut(index)
+            .ok_or(CommandError::SceneObjectNotFound { index })?;
+        match &mut object.kind {
+            SceneObjectKind::DirectionalLight(existing) => {
+                *existing = data.clone();
+            }
+            _ => return Err(CommandError::SceneObjectNotDirectionalLight { index }),
+        }
+
+        let Some(render) = &mut self.render else {
+            return Err(CommandError::RenderNotInitialized);
+        };
+        if let Some(light_entity) = self
+            .scene_runtime
+            .get(index)
+            .and_then(|runtime| runtime.root_entity)
+        {
+            render.set_light_entity(light_entity);
+        }
+        render.set_directional_light(data.color, data.intensity, data.direction);
+        Ok(CommandOutcome::None)
+    }
+
+    fn command_set_environment(
+        &mut self,
+        data: EnvironmentData,
+        apply_runtime: bool,
+    ) -> Result<CommandOutcome, CommandError> {
+        let had_environment = self
+            .scene
+            .objects()
+            .iter()
+            .any(|object| matches!(object.kind, SceneObjectKind::Environment(_)));
+
+        if apply_runtime {
+            if data.ibl_path.is_empty() && data.skybox_path.is_empty() {
+                return Err(CommandError::EnvironmentPathsMissing);
+            }
+            let Some(render) = &mut self.render else {
+                return Err(CommandError::RenderNotInitialized);
+            };
+            let ok = render.set_environment(&data.ibl_path, &data.skybox_path, data.intensity);
+            if !ok {
+                return Err(CommandError::EnvironmentLoadFailed {
+                    ibl: data.ibl_path.clone(),
+                    skybox: data.skybox_path.clone(),
+                });
+            }
+            render.set_environment_intensity(data.intensity);
+        }
+
+        self.scene.set_environment(data);
+        if !had_environment {
+            self.scene_runtime.push(RuntimeObject::default());
+        }
+
+        if apply_runtime {
+            Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Info,
+                message: "Environment loaded.".to_string(),
+            }))
+        } else {
+            Ok(CommandOutcome::None)
+        }
+    }
+
+    fn command_transform_node(
+        &mut self,
+        index: usize,
+        position: [f32; 3],
+        rotation_deg: [f32; 3],
+        scale: [f32; 3],
+    ) -> Result<CommandOutcome, CommandError> {
+        let object = self
+            .scene
+            .object_mut(index)
+            .ok_or(CommandError::SceneObjectNotFound { index })?;
+        match &mut object.kind {
+            SceneObjectKind::Asset(data) => {
+                data.position = position;
+                data.rotation_deg = rotation_deg;
+                data.scale = scale;
+            }
+            _ => return Err(CommandError::SceneObjectNotTransformable { index }),
+        }
+
+        let Some(entity) = self
+            .scene_runtime
+            .get(index)
+            .and_then(|runtime| runtime.root_entity)
+        else {
+            return Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!(
+                    "Transform updated for object {} but runtime entity is unavailable.",
+                    index
+                ),
+            }));
+        };
+
+        let Some(render) = &mut self.render else {
+            return Err(CommandError::RenderNotInitialized);
+        };
+        let matrix = compose_transform_matrix(position, rotation_deg, scale);
+        render.set_entity_transform(entity, matrix);
+        Ok(CommandOutcome::None)
+    }
+
+    fn command_save_scene(&mut self, path: &std::path::Path) -> Result<CommandOutcome, CommandError> {
+        crate::scene::serialization::save_scene_to_file(&self.scene, path)?;
+        Ok(CommandOutcome::Notice(CommandNotice {
+            severity: CommandSeverity::Info,
+            message: format!("Scene saved: {}", path.display()),
+        }))
+    }
+
+    fn command_load_scene(&mut self, path: &std::path::Path) -> Result<CommandOutcome, CommandError> {
+        let loaded_scene = crate::scene::serialization::load_scene_from_file(path)?;
+        self.scene = loaded_scene;
+        match self.rebuild_runtime_scene() {
+            Ok(()) => Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Info,
+                message: format!("Scene loaded: {}", path.display()),
+            })),
+            Err(err) => Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!("Scene loaded with warnings:\n{}", err),
+            })),
+        }
+    }
+
     fn handle_create_gltf_action(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("glTF", &["gltf", "glb"])
@@ -420,71 +838,25 @@ impl App {
         else {
             return;
         };
-        let Some(path_str) = path.to_str() else {
+        let Some(path_str) = path.to_str().map(|value| value.to_string()) else {
             return;
         };
-        let Some(render) = &mut self.render else {
-            return;
-        };
-
-        let (engine, scene) = render.engine_scene_mut();
-        let mut entity_manager = engine.entity_manager();
-        log::info!("Loading glTF: {}", path_str);
-        match self
-            .assets
-            .load_gltf_from_path(engine, scene, &mut entity_manager, path_str)
-        {
-            Ok(loaded) => {
-                log::info!(
-                    "Loaded glTF '{}' center={:?} extent={:?}",
-                    path_str,
-                    loaded.center,
-                    loaded.extent
-                );
-                self.scene.add_asset(loaded.name.clone(), path_str);
-                self.scene_runtime.push(RuntimeObject {
-                    root_entity: Some(loaded.root_entity),
-                    center: loaded.center,
-                    extent: loaded.extent,
-                });
-                self.camera = CameraController::from_bounds(loaded.center, loaded.extent);
-                self.camera.apply(render.camera_mut());
-            }
-            Err(err) => {
-                log::warn!("Failed to load glTF {}: {}", path_str, err);
-                self.ui
-                    .set_environment_status(format!("Failed to load glTF:\n{}", err));
-            }
-        }
+        let result = self.execute_scene_command(SceneCommand::AddAsset {
+            path: path_str.clone(),
+        });
+        self.apply_command_feedback(&format!("Failed to load glTF {}", path_str), result);
     }
 
     fn handle_create_light_action(&mut self) {
-        let Some(render) = &mut self.render else {
-            return;
-        };
-        let (engine, scene) = render.engine_scene_mut();
-        let mut entity_manager = engine.entity_manager();
-        let light_entity = engine.create_directional_light(
-            &mut entity_manager,
-            [1.0, 1.0, 1.0],
-            100_000.0,
-            [0.0, -1.0, -0.5],
-        );
-        scene.add_entity(light_entity);
-        self.scene.add_directional_light(
-            "Directional Light",
-            DirectionalLightData {
+        let result = self.execute_scene_command(SceneCommand::AddDirectionalLight {
+            name: "Directional Light".to_string(),
+            data: DirectionalLightData {
                 color: [1.0, 1.0, 1.0],
                 intensity: 100_000.0,
                 direction: [0.0, -1.0, -0.5],
             },
-        );
-        self.scene_runtime.push(RuntimeObject {
-            root_entity: Some(light_entity),
-            center: [0.0, 0.0, 0.0],
-            extent: [0.0, 0.0, 0.0],
         });
-        render.set_light_entity(light_entity);
+        self.apply_command_feedback("Failed to create directional light", result);
     }
 
     fn handle_save_scene_action(&mut self) {
@@ -493,9 +865,8 @@ impl App {
             .set_file_name("scene.json")
             .save_file()
         {
-            if let Err(e) = crate::scene::serialization::save_scene_to_file(&self.scene, &path) {
-                log::warn!("Failed to save scene: {}", e);
-            }
+            let result = self.execute_scene_command(SceneCommand::SaveScene { path: path.clone() });
+            self.apply_command_feedback("Failed to save scene", result);
         }
     }
 
@@ -507,22 +878,8 @@ impl App {
             return;
         };
 
-        match crate::scene::serialization::load_scene_from_file(&path) {
-            Ok(loaded_scene) => {
-                self.scene = loaded_scene;
-                match self.rebuild_runtime_scene() {
-                    Ok(()) => log::info!("Scene loaded from {:?}", path),
-                    Err(err) => {
-                        log::warn!("Scene loaded with runtime rebuild errors: {}", err);
-                        self.ui
-                            .set_environment_status(format!("Scene load warnings:\n{}", err));
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to load scene: {}", e);
-            }
-        }
+        let result = self.execute_scene_command(SceneCommand::LoadScene { path: path.clone() });
+        self.apply_command_feedback("Failed to load scene", result);
     }
 
     fn rebuild_runtime_scene(&mut self) -> Result<(), String> {
@@ -530,8 +887,19 @@ impl App {
             return Ok(());
         };
 
+        // Conservative teardown order for native resource safety:
+        // 1) drain GPU work
+        // 2) detach/replace scene references
+        // 3) drop asset-owned resources
+        // 4) drain again before rebuilding
+        log::info!("Runtime rebuild: flush before teardown");
+        render.flush_and_wait();
+        log::info!("Runtime rebuild: clear scene references");
         render.clear_scene();
-        self.assets.clear();
+        render.flush_and_wait();
+        log::info!("Runtime rebuild: rotate asset generations");
+        self.assets.prepare_for_scene_rebuild();
+        render.flush_and_wait();
         self.scene_runtime.clear();
 
         let source_objects = self.scene.objects().to_vec();
@@ -635,14 +1003,14 @@ impl App {
         }
 
         if let Some((center, extent)) = first_asset_bounds {
+            self.orbit_pivot = center;
             self.camera = CameraController::from_bounds(center, extent);
             self.camera.apply(render.camera_mut());
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("\n"))
+        match format_rebuild_errors(&errors) {
+            Some(message) => Err(message),
+            None => Ok(()),
         }
     }
 
@@ -862,6 +1230,34 @@ impl App {
     }
 }
 
+fn format_rebuild_errors(errors: &[String]) -> Option<String> {
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_rebuild_errors;
+
+    #[test]
+    fn rebuild_error_format_empty_is_none() {
+        assert!(format_rebuild_errors(&[]).is_none());
+    }
+
+    #[test]
+    fn rebuild_error_format_preserves_order() {
+        let errors = vec![
+            "Asset 'a.glb' failed".to_string(),
+            "Environment failed".to_string(),
+        ];
+        let formatted = format_rebuild_errors(&errors).unwrap();
+        assert_eq!(formatted, "Asset 'a.glb' failed\nEnvironment failed");
+    }
+}
+
 fn buffer_to_string(buffer: &[u8]) -> String {
     let end = buffer
         .iter()
@@ -1003,13 +1399,32 @@ impl ApplicationHandler for App {
             .with_inner_size(PhysicalSize::new(1280u32, 720u32))
             .with_resizable(true);
 
-        let window = Arc::new(
-            event_loop
-                .create_window(window_attrs)
-                .expect("Failed to create window"),
-        );
+        let window = match event_loop.create_window(window_attrs) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                let message = format!("Failed to create window: {err}");
+                log::error!("{message}");
+                let _ = rfd::MessageDialog::new()
+                    .set_title("Previz Startup Error")
+                    .set_description(&message)
+                    .show();
+                self.close_requested = true;
+                event_loop.exit();
+                return;
+            }
+        };
 
-        self.init_filament(&window);
+        if let Err(err) = self.init_filament(&window) {
+            let message = format!("Failed to initialize renderer: {err}");
+            log::error!("{message}");
+            let _ = rfd::MessageDialog::new()
+                .set_title("Previz Startup Error")
+                .set_description(&message)
+                .show();
+            self.close_requested = true;
+            event_loop.exit();
+            return;
+        }
         self.update_target_frame_duration(&window);
         self.window = Some(window);
     }
@@ -1059,20 +1474,21 @@ impl ApplicationHandler for App {
                 }
 
                 if !ui_capture_keyboard {
-                    match self.input.handle_key(event.physical_key, pressed) {
-                        InputAction::ZoomIn => {
-                            self.camera.nudge(0.0, 0.0, -0.3);
-                            if let Some(render) = &mut self.render {
-                                self.camera.apply(render.camera_mut());
-                            }
+                    if pressed && event.physical_key == PhysicalKey::Code(KeyCode::KeyF) {
+                        if !self.focus_selected() {
+                            self.ui.set_environment_status(
+                                "Focus selected unavailable: select an asset first.".to_string(),
+                            );
                         }
-                        InputAction::ZoomOut => {
-                            self.camera.nudge(0.0, 0.0, 0.3);
-                            if let Some(render) = &mut self.render {
-                                self.camera.apply(render.camera_mut());
-                            }
+                        return;
+                    }
+                    self.input.handle_key(event.physical_key, pressed);
+                    if pressed {
+                        match event.physical_key {
+                            PhysicalKey::Code(KeyCode::Equal) => self.nudge_camera(0.0, 0.0, -0.3),
+                            PhysicalKey::Code(KeyCode::Minus) => self.nudge_camera(0.0, 0.0, 0.3),
+                            _ => {}
                         }
-                        InputAction::None => {}
                     }
                 }
             }
@@ -1104,9 +1520,24 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_pos = Some((position.x as f32, position.y as f32));
+                let new_pos = (position.x as f32, position.y as f32);
+                let prev_pos = self.mouse_pos;
+                self.mouse_pos = Some(new_pos);
+                let mut ui_capture_mouse = false;
                 if let Some(render) = &mut self.render {
-                    render.ui_mouse_pos(position.x as f32, position.y as f32);
+                    render.ui_mouse_pos(new_pos.0, new_pos.1);
+                    ui_capture_mouse = render.ui_want_capture_mouse();
+                }
+                if !ui_capture_mouse {
+                    if let (Some((px, py)), Some(mode)) = (prev_pos, self.camera_drag_mode) {
+                        let dx = new_pos.0 - px;
+                        let dy = new_pos.1 - py;
+                        match mode {
+                            CameraDragMode::Orbit => self.orbit_camera(dx, dy),
+                            CameraDragMode::Pan => self.pan_camera(dx, dy),
+                            CameraDragMode::Dolly => self.dolly_camera(-dy * 0.02),
+                        }
+                    }
                 }
             }
             WindowEvent::CursorEntered { .. } => {
@@ -1118,6 +1549,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.mouse_pos = None;
+                self.camera_drag_mode = None;
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(-f32::MAX, -f32::MAX);
                 }
@@ -1128,8 +1560,33 @@ impl ApplicationHandler for App {
                     if button_index >= 0 && (button_index as usize) < self.mouse_buttons.len() {
                         self.mouse_buttons[button_index as usize] = pressed;
                     }
+                    let mut ui_capture_mouse = false;
                     if let Some(render) = &mut self.render {
                         render.ui_mouse_button(button_index, pressed);
+                        ui_capture_mouse = render.ui_want_capture_mouse();
+                    }
+                    if !ui_capture_mouse {
+                        match self.camera_control_profile {
+                            CameraControlProfile::Blender => match (button, pressed) {
+                                (MouseButton::Middle, true) => {
+                                    let state = self.modifiers.state();
+                                    if state.control_key() {
+                                        self.camera_drag_mode = Some(CameraDragMode::Dolly);
+                                    } else if state.shift_key() {
+                                        self.camera_drag_mode = Some(CameraDragMode::Pan);
+                                    } else {
+                                        self.camera_drag_mode = Some(CameraDragMode::Orbit);
+                                    }
+                                }
+                                (MouseButton::Middle, false) => {
+                                    self.camera_drag_mode = None;
+                                }
+                                _ => {}
+                            },
+                            CameraControlProfile::FpsLike => {
+                                // Reserved for future alternate camera controls.
+                            }
+                        }
                     }
                 }
             }
@@ -1138,8 +1595,13 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(x, y) => (x, y),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
+                let mut ui_capture_mouse = false;
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_wheel(wheel_x, wheel_y);
+                    ui_capture_mouse = render.ui_want_capture_mouse();
+                }
+                if !ui_capture_mouse {
+                    self.dolly_camera(wheel_y * 0.15);
                 }
             }
             WindowEvent::RedrawRequested => {

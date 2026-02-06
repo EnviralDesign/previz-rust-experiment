@@ -118,6 +118,19 @@ Foundation order:
    - translate/rotate/scale gizmos
    - command-driven transform operations with undo-ready structure
 
+Current camera interaction contract (M1 baseline):
+- keyboard:
+  - arrow keys adjust aim
+  - `+/-` dolly in/out
+  - `F` focus selected asset bounds
+- mouse (when UI is not capturing mouse):
+  - `MMB drag` orbit around orbit pivot
+  - `Shift+MMB drag` pan
+  - `Ctrl+MMB drag` dolly
+  - wheel dolly
+- UI capture precedence:
+  - when ImGui wants mouse/keyboard, camera controls do not consume those inputs
+
 Rule:
 - no authoring UX feature should directly bypass scene command/runtime boundaries.
 

@@ -6,14 +6,14 @@
         "Asset": {
           "path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
           "position": [
+            0.1,
             0.0,
-            0.25,
-            0.0
+            0.5
           ],
           "rotation_deg": [
-            30.0,
-            45.0,
-            20.0
+            0.0,
+            25.0,
+            30.0
           ],
           "scale": [
             1.0,
@@ -30,11 +30,11 @@
           "color": [
             1.0,
             1.0,
-            1.0
+            0.0
           ],
-          "intensity": 156888.9,
+          "intensity": 199111.1,
           "direction": [
-            -1.0,
+            0.0,
             -1.0,
             -0.5
           ]
@@ -48,7 +48,7 @@
           "hdr_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace.hdr",
           "ibl_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace_ibl.ktx",
           "skybox_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace_skybox.ktx",
-          "intensity": 42444.4
+          "intensity": 85111.1
         }
       }
     }

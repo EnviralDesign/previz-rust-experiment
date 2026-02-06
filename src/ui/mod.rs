@@ -87,10 +87,6 @@ impl UiState {
         &self.asset_summary
     }
 
-    pub fn selected_index(&self) -> i32 {
-        self.selected_index
-    }
-
     pub fn set_selected_index(&mut self, index: i32) {
         self.selected_index = index;
     }

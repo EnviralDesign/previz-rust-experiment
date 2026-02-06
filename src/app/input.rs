@@ -14,40 +14,14 @@ pub struct InputState {
     pub aim_down: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum InputAction {
-    None,
-    ZoomIn,
-    ZoomOut,
-}
-
 impl InputState {
-    pub fn handle_key(&mut self, key: PhysicalKey, pressed: bool) -> InputAction {
+    pub fn handle_key(&mut self, key: PhysicalKey, pressed: bool) {
         match key {
             PhysicalKey::Code(KeyCode::ArrowLeft) => self.aim_left = pressed,
             PhysicalKey::Code(KeyCode::ArrowRight) => self.aim_right = pressed,
             PhysicalKey::Code(KeyCode::ArrowUp) => self.aim_up = pressed,
             PhysicalKey::Code(KeyCode::ArrowDown) => self.aim_down = pressed,
-            PhysicalKey::Code(KeyCode::KeyW) => self.move_forward = pressed,
-            PhysicalKey::Code(KeyCode::KeyS) => self.move_backward = pressed,
-            PhysicalKey::Code(KeyCode::KeyA) => self.move_left = pressed,
-            PhysicalKey::Code(KeyCode::KeyD) => self.move_right = pressed,
-            PhysicalKey::Code(KeyCode::Space) => self.move_up = pressed,
-            PhysicalKey::Code(KeyCode::ControlLeft) | PhysicalKey::Code(KeyCode::ControlRight) => {
-                self.move_down = pressed
-            }
-            PhysicalKey::Code(KeyCode::Equal) => {
-                if pressed {
-                    return InputAction::ZoomIn;
-                }
-            }
-            PhysicalKey::Code(KeyCode::Minus) => {
-                if pressed {
-                    return InputAction::ZoomOut;
-                }
-            }
             _ => {}
         }
-        InputAction::None
     }
 }

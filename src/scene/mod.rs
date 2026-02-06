@@ -3,7 +3,7 @@ pub mod serialization;
 use crate::filament::Entity;
 
 /// Asset-specific data - matches what can be edited in UI
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AssetData {
     pub path: String,
     pub position: [f32; 3],
@@ -12,7 +12,7 @@ pub struct AssetData {
 }
 
 /// Directional light-specific data - matches what can be edited in UI
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DirectionalLightData {
     pub color: [f32; 3],
     pub intensity: f32,
@@ -20,7 +20,7 @@ pub struct DirectionalLightData {
 }
 
 /// Environment-specific data - matches what can be edited in UI
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EnvironmentData {
     pub hdr_path: String,
     pub ibl_path: String,

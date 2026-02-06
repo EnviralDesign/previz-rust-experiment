@@ -47,30 +47,58 @@ impl CameraController {
         Self::new(position, yaw, pitch)
     }
 
-    pub fn apply(&mut self, camera: &mut Camera) {
-        let pitch = self.pitch.clamp(-1.4, 1.4);
-        self.pitch = pitch;
-
-        let cos_pitch = pitch.cos();
-        let dir = [
+    pub fn frame_bounds_preserve_orientation(&mut self, center: [f32; 3], extent: [f32; 3]) {
+        let radius = extent[0].max(extent[1]).max(extent[2]);
+        let distance = if radius > 0.0 { radius * 3.0 } else { 3.0 };
+        let cos_pitch = self.pitch.cos();
+        let forward = [
             self.yaw.cos() * cos_pitch,
-            pitch.sin(),
+            self.pitch.sin(),
             self.yaw.sin() * cos_pitch,
         ];
+        self.position = [
+            center[0] - forward[0] * distance,
+            center[1] - forward[1] * distance,
+            center[2] - forward[2] * distance,
+        ];
+    }
+
+    pub fn apply(&mut self, camera: &mut Camera) {
+        let (dir, _right, up) = self.basis();
         let eye = self.position;
         let center = [eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2]];
-        camera.look_at(eye, center, [0.0, 1.0, 0.0]);
+        camera.look_at(eye, center, up);
     }
 
     pub fn nudge(&mut self, yaw_delta: f32, pitch_delta: f32, zoom_delta: f32) {
         self.yaw += yaw_delta;
         self.pitch += pitch_delta;
+        wrap_angles(&mut self.yaw, &mut self.pitch);
         if zoom_delta != 0.0 {
-            let (forward, _, _) = camera_basis(self.yaw, self.pitch);
+            let (forward, _, _) = self.basis();
             self.position[0] += forward[0] * zoom_delta;
             self.position[1] += forward[1] * zoom_delta;
             self.position[2] += forward[2] * zoom_delta;
         }
+    }
+
+    pub fn orbit_around(&mut self, pivot: [f32; 3], yaw_delta: f32, pitch_delta: f32) {
+        self.yaw += yaw_delta;
+        self.pitch += pitch_delta;
+        wrap_angles(&mut self.yaw, &mut self.pitch);
+
+        let dx = self.position[0] - pivot[0];
+        let dy = self.position[1] - pivot[1];
+        let dz = self.position[2] - pivot[2];
+        let distance = (dx * dx + dy * dy + dz * dz).sqrt().max(0.05);
+        let (dir, _, _) = self.basis();
+        self.position[0] = pivot[0] - dir[0] * distance;
+        self.position[1] = pivot[1] - dir[1] * distance;
+        self.position[2] = pivot[2] - dir[2] * distance;
+    }
+
+    pub fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        camera_basis(self.yaw, self.pitch)
     }
 
     pub fn move_horizontal(&mut self, right: f32, up: f32, forward: f32) {
@@ -152,10 +180,19 @@ fn forward_to_yaw_pitch(forward: [f32; 3]) -> (f32, f32) {
 fn camera_basis(yaw: f32, pitch: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let cos_pitch = pitch.cos();
     let forward = [yaw.cos() * cos_pitch, pitch.sin(), yaw.sin() * cos_pitch];
-    let world_up = [0.0, 1.0, 0.0];
-    let right = normalize(cross(forward, world_up));
-    let up = cross(right, forward);
+    let right = [-yaw.sin(), 0.0, yaw.cos()];
+    let up = normalize(cross(right, forward));
     (forward, right, up)
+}
+
+fn wrap_angles(yaw: &mut f32, pitch: &mut f32) {
+    const TWO_PI: f32 = std::f32::consts::PI * 2.0;
+    if yaw.is_finite() {
+        *yaw = (*yaw + std::f32::consts::PI).rem_euclid(TWO_PI) - std::f32::consts::PI;
+    }
+    if pitch.is_finite() {
+        *pitch = (*pitch + std::f32::consts::PI).rem_euclid(TWO_PI) - std::f32::consts::PI;
+    }
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -172,5 +209,49 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
         [v[0] / len, v[1] / len, v[2] / len]
     } else {
         [0.0, 0.0, 0.0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CameraController, CameraMovement};
+
+    #[test]
+    fn from_bounds_produces_finite_state() {
+        let camera = CameraController::from_bounds([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
+        assert!(camera.position.iter().all(|value| value.is_finite()));
+        assert!(camera.yaw.is_finite());
+        assert!(camera.pitch.is_finite());
+    }
+
+    #[test]
+    fn movement_update_keeps_finite_values() {
+        let mut camera = CameraController::new([0.0, 0.0, 5.0], 0.0, 0.0);
+        let movement = CameraMovement {
+            move_forward: true,
+            move_backward: false,
+            move_left: false,
+            move_right: true,
+            move_up: true,
+            move_down: false,
+            aim_left: false,
+            aim_right: true,
+            aim_up: true,
+            aim_down: false,
+        };
+        let changed = camera.update_movement(&movement, 1.0 / 60.0);
+        assert!(changed);
+        assert!(camera.position.iter().all(|value| value.is_finite()));
+        assert!(camera.yaw.is_finite());
+        assert!(camera.pitch.is_finite());
+    }
+
+    #[test]
+    fn frame_bounds_preserves_orientation() {
+        let mut camera = CameraController::new([5.0, 6.0, 7.0], 1.1, -0.3);
+        camera.frame_bounds_preserve_orientation([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        assert!((camera.yaw - 1.1).abs() < 1e-6);
+        assert!((camera.pitch + 0.3).abs() < 1e-6);
+        assert!(camera.position.iter().all(|value| value.is_finite()));
     }
 }

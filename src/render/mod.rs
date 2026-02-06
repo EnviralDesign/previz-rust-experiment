@@ -14,6 +14,30 @@ use winit::window::Window;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+#[derive(Debug, thiserror::Error)]
+pub enum RenderError {
+    #[error("native window handle unavailable: {0}")]
+    NativeHandleUnavailable(String),
+    #[error("unsupported window handle type for this platform")]
+    UnsupportedWindowHandle,
+    #[error("failed to create Filament engine")]
+    EngineCreateFailed,
+    #[error("failed to create Filament swap chain")]
+    SwapChainCreateFailed,
+    #[error("failed to create Filament renderer")]
+    RendererCreateFailed,
+    #[error("failed to create Filament scene")]
+    SceneCreateFailed,
+    #[error("failed to create Filament view")]
+    ViewCreateFailed,
+    #[error("failed to create Filament camera")]
+    CameraCreateFailed,
+    #[error("failed to create UI view")]
+    UiViewCreateFailed,
+    #[error("failed to create ImGui helper")]
+    UiHelperCreateFailed,
+}
+
 pub struct RenderContext {
     engine: Engine,
     swap_chain: SwapChain,
@@ -23,6 +47,7 @@ pub struct RenderContext {
     ui_helper: Option<ImGuiHelper>,
     scene: Scene,
     camera: Camera,
+    selected_entity: Option<Entity>,
     light_entity: Option<Entity>,
     indirect_light: Option<IndirectLight>,
     indirect_light_texture: Option<Texture>,
@@ -31,25 +56,27 @@ pub struct RenderContext {
 }
 
 impl RenderContext {
-    pub fn new(window: &Window) -> Self {
-        let native_handle = get_native_window_handle(window);
+    pub fn new(window: &Window) -> Result<Self, RenderError> {
+        let native_handle = get_native_window_handle(window)?;
         let window_size = window.inner_size();
 
-        let mut engine = Engine::create(Backend::OpenGL).expect("Failed to create Filament engine");
+        let mut engine = Engine::create(Backend::OpenGL).ok_or(RenderError::EngineCreateFailed)?;
         let swap_chain = engine
             .create_swap_chain(native_handle)
-            .expect("Failed to create swap chain");
-        let mut renderer = engine.create_renderer().expect("Failed to create renderer");
+            .ok_or(RenderError::SwapChainCreateFailed)?;
+        let mut renderer = engine
+            .create_renderer()
+            .ok_or(RenderError::RendererCreateFailed)?;
         renderer.set_clear_options(0.1, 0.1, 0.2, 1.0, true, true);
 
-        let mut scene = engine.create_scene().expect("Failed to create scene");
-        let mut view = engine.create_view().expect("Failed to create view");
+        let mut scene = engine.create_scene().ok_or(RenderError::SceneCreateFailed)?;
+        let mut view = engine.create_view().ok_or(RenderError::ViewCreateFailed)?;
 
         let mut entity_manager = engine.entity_manager();
         let camera_entity = entity_manager.create();
         let mut camera = engine
             .create_camera(camera_entity)
-            .expect("Failed to create camera");
+            .ok_or(RenderError::CameraCreateFailed)?;
 
         view.set_viewport(0, 0, window_size.width, window_size.height);
         view.set_scene(&mut scene);
@@ -57,7 +84,7 @@ impl RenderContext {
 
         // No lights created at startup - user adds them via UI
 
-        Self {
+        Ok(Self {
             engine,
             swap_chain,
             renderer,
@@ -66,12 +93,13 @@ impl RenderContext {
             ui_helper: None,
             scene,
             camera,
+            selected_entity: None,
             light_entity: None,
             indirect_light: None,
             indirect_light_texture: None,
             skybox: None,
             skybox_texture: None,
-        }
+        })
     }
 
     pub fn engine_scene_mut(&mut self) -> (&mut Engine, &mut Scene) {
@@ -109,15 +137,19 @@ impl RenderContext {
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
     }
 
-    pub fn init_ui(&mut self, window: &Window) {
-        let mut ui_view = self.engine.create_view().expect("Failed to create UI view");
+    pub fn init_ui(&mut self, window: &Window) -> Result<(), RenderError> {
+        let mut ui_view = self
+            .engine
+            .create_view()
+            .ok_or(RenderError::UiViewCreateFailed)?;
         ui_view.set_viewport(0, 0, window.inner_size().width, window.inner_size().height);
         let mut helper = ImGuiHelper::create(&mut self.engine, &mut ui_view, None)
-            .expect("Failed to create ImGui helper");
+            .ok_or(RenderError::UiHelperCreateFailed)?;
         let size = window.inner_size();
         helper.set_display_size(size.width as i32, size.height as i32, 1.0, 1.0, false);
         self.ui_view = Some(ui_view);
         self.ui_helper = Some(helper);
+        Ok(())
     }
 
     pub fn ui_mouse_pos(&mut self, x: f32, y: f32) {
@@ -262,6 +294,11 @@ impl RenderContext {
         self.light_entity = Some(entity);
     }
 
+    pub fn set_selected_entity(&mut self, entity: Option<Entity>) {
+        // Placeholder hook for upcoming viewport highlighting/picking.
+        self.selected_entity = entity;
+    }
+
     pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) {
         let mut tm = self.engine.transform_manager();
         tm.set_transform(entity, &matrix4x4);
@@ -315,7 +352,12 @@ impl RenderContext {
         // Remove all entities from the Filament scene except camera
         // Note: In a full implementation, we'd track all entities and remove them properly
         // For now, we create a fresh scene
-        self.scene = self.engine.create_scene().expect("Failed to create scene");
+        if let Some(new_scene) = self.engine.create_scene() {
+            self.scene = new_scene;
+        } else {
+            log::error!("Failed to create replacement scene during clear_scene; keeping existing scene.");
+            return;
+        }
         self.view.set_scene(&mut self.scene);
 
         // Reset environment
@@ -329,13 +371,25 @@ impl RenderContext {
         // Reset light entity reference (it will be recreated if needed)
         self.light_entity = None;
     }
+
+    pub fn flush_and_wait(&mut self) {
+        self.engine.flush_and_wait();
+    }
 }
 
 /// Get the native window handle (HWND) on Windows
 #[cfg(target_os = "windows")]
-fn get_native_window_handle(window: &Window) -> *mut c_void {
-    match window.window_handle().unwrap().as_raw() {
-        RawWindowHandle::Win32(handle) => handle.hwnd.get() as *mut c_void,
-        _ => panic!("Expected Win32 window handle"),
+fn get_native_window_handle(window: &Window) -> Result<*mut c_void, RenderError> {
+    let handle = window
+        .window_handle()
+        .map_err(|err| RenderError::NativeHandleUnavailable(err.to_string()))?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get() as *mut c_void),
+        _ => Err(RenderError::UnsupportedWindowHandle),
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_native_window_handle(_window: &Window) -> Result<*mut c_void, RenderError> {
+    Err(RenderError::UnsupportedWindowHandle)
 }
