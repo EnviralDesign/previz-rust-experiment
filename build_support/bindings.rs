@@ -232,6 +232,13 @@ extern "C" {
         name: *const c_char,
         out_value: *mut f32,
     ) -> bool;
+    pub fn filament_material_instance_set_texture_from_ktx(
+        engine: *mut Engine,
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        ktx_path: *const c_char,
+        out_texture: *mut *mut Texture,
+    ) -> bool;
     
     // ========================================================================
     // Vertex Buffer

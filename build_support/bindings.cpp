@@ -15,6 +15,7 @@
 #include <filament/IndirectLight.h>
 #include <filament/Skybox.h>
 #include <filament/Texture.h>
+#include <filament/TextureSampler.h>
 #include <filament/LightManager.h>
 #include <filament/TransformManager.h>
 #include <filament/Box.h>
@@ -483,6 +484,34 @@ bool filament_material_instance_get_float4(
     out_value[1] = value.y;
     out_value[2] = value.z;
     out_value[3] = value.w;
+    return true;
+}
+
+bool filament_material_instance_set_texture_from_ktx(
+    Engine* engine,
+    MaterialInstance* instance,
+    const char* name,
+    const char* ktx_path,
+    Texture** out_texture
+) {
+    if (!engine || !instance || !name || !ktx_path || !out_texture) {
+        return false;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return false;
+    }
+    std::vector<uint8_t> bytes;
+    if (!read_file_bytes(ktx_path, bytes)) {
+        return false;
+    }
+    auto* bundle = new image::Ktx1Bundle(bytes.data(), (uint32_t)bytes.size());
+    Texture* texture = ktxreader::Ktx1Reader::createTexture(engine, bundle, false);
+    if (!texture) {
+        return false;
+    }
+    instance->setParameter(name, texture, TextureSampler());
+    *out_texture = texture;
     return true;
 }
 

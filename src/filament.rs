@@ -290,6 +290,45 @@ impl Engine {
         }
     }
 
+    pub fn bind_material_texture_from_ktx(
+        &mut self,
+        material_instance: &mut MaterialInstance,
+        param_name: &str,
+        ktx_path: &str,
+    ) -> Option<Texture> {
+        let c_param = match CString::new(param_name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid texture parameter name (contains NUL byte).");
+                return None;
+            }
+        };
+        let c_path = match CString::new(ktx_path) {
+            Ok(path) => path,
+            Err(_) => {
+                log::warn!("Invalid texture path (contains NUL byte).");
+                return None;
+            }
+        };
+        unsafe {
+            let mut texture_ptr: *mut ffi::Texture = std::ptr::null_mut();
+            let ok = ffi::filament_material_instance_set_texture_from_ktx(
+                self.ptr.as_ptr() as *mut _,
+                material_instance.ptr.as_ptr() as *mut _,
+                c_param.as_ptr(),
+                c_path.as_ptr(),
+                &mut texture_ptr as *mut *mut ffi::Texture,
+            );
+            if !ok {
+                return None;
+            }
+            NonNull::new(texture_ptr as *mut c_void).map(|ptr| Texture {
+                ptr,
+                engine: self.ptr,
+            })
+        }
+    }
+
     /// Create a material from package bytes
     pub fn create_material(&mut self, package: &[u8]) -> Option<Material> {
         unsafe {

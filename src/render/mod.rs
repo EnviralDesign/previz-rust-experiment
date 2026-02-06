@@ -4,7 +4,7 @@ pub use camera::{CameraController, CameraMovement};
 
 use crate::filament::{
     Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox,
-    SwapChain, Texture, View,
+    SwapChain, Texture, View, MaterialInstance,
 };
 use std::ffi::c_void;
 use std::ffi::CString;
@@ -55,6 +55,7 @@ pub struct RenderContext {
     indirect_light_texture: Option<Texture>,
     skybox: Option<Skybox>,
     skybox_texture: Option<Texture>,
+    material_textures: Vec<Texture>,
 }
 
 impl RenderContext {
@@ -103,6 +104,7 @@ impl RenderContext {
             indirect_light_texture: None,
             skybox: None,
             skybox_texture: None,
+            material_textures: Vec::new(),
         })
     }
 
@@ -312,6 +314,22 @@ impl RenderContext {
         true
     }
 
+    pub fn bind_material_texture_from_ktx(
+        &mut self,
+        material_instance: &mut MaterialInstance,
+        texture_param: &str,
+        ktx_path: &str,
+    ) -> bool {
+        let Some(texture) = self
+            .engine
+            .bind_material_texture_from_ktx(material_instance, texture_param, ktx_path)
+        else {
+            return false;
+        };
+        self.material_textures.push(texture);
+        true
+    }
+
     pub fn set_environment(&mut self, ibl_path: &str, skybox_path: &str, intensity: f32) -> bool {
         if ibl_path.is_empty() && skybox_path.is_empty() {
             return false;
@@ -323,6 +341,7 @@ impl RenderContext {
         self.indirect_light_texture = None;
         self.skybox = None;
         self.skybox_texture = None;
+        self.material_textures.clear();
 
         if !ibl_path.is_empty() {
             if let Some((light, texture)) = self

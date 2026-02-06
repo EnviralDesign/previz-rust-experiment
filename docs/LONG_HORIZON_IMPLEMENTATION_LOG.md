@@ -37,6 +37,36 @@ This file captures medium/long-run implementation context so we do not lose inte
   - override key now effectively resolves via `object_id + material_slot`
   - fallback compatibility retained for older scene files (`asset_path+slot`, then legacy `material_name`)
 
+### New slice completed: texture/media override scaffolding
+- Added scene schema for texture/media bindings:
+  - `MaterialTextureBindingData` with `texture_param`, `source_kind`, `source_path`
+  - scene stores bindings keyed by `object_id + material_slot + texture_param`
+- Added command path:
+  - `SetMaterialTextureBinding` validates non-empty source path
+  - persists binding into scene model
+  - returns explicit notice that runtime apply is pending
+- Rebuild diagnostics:
+  - if texture bindings exist, rebuild warning reports that runtime texture apply is not yet implemented
+- Added tests:
+  - scene serialization roundtrip for texture bindings
+  - app command tests for validation + scene persistence
+
+### Deliberate limitation (explicit)
+- Runtime application of texture bindings is not yet wired because texture/sampler binding calls are not exposed in current Filament FFI surface.
+- Next technical step is exposing texture parameter set/get plumbing in `build_support/bindings.cpp` and Rust wrappers.
+
+### Follow-up completed in same run
+- Exposed minimal texture-parameter FFI for KTX:
+  - Added `filament_material_instance_set_texture_from_ktx(...)` C wrapper.
+  - Added Rust binding and `Engine::bind_material_texture_from_ktx(...)`.
+- Render runtime now retains bound textures:
+  - `RenderContext` keeps `material_textures` alive and clears them on scene reset.
+- Runtime apply path added:
+  - `SetMaterialTextureBinding` now attempts immediate runtime apply when render is active.
+  - Scene rebuild re-applies stored texture bindings.
+- Current runtime format support:
+  - `.ktx` only (image/video files are still persisted but reported as unsupported for runtime apply).
+
 ### Known constraints
 - Texture path/slot authoring UI is not yet wired.
 - Video texture/media pipeline remains planned, not implemented.

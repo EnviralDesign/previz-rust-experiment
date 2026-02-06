@@ -37,6 +37,20 @@ pub struct MaterialOverrideData {
     pub emissive_rgb: [f32; 3],
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum MediaSourceKind {
+    Image,
+    #[allow(dead_code)]
+    Video,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaterialTextureBindingData {
+    pub texture_param: String,
+    pub source_kind: MediaSourceKind,
+    pub source_path: String,
+}
+
 /// Maps a material identity to user-authored override values.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MaterialOverrideEntry {
@@ -73,6 +87,8 @@ pub struct SceneState {
     objects: Vec<SceneObject>,
     #[serde(default)]
     material_overrides: Vec<MaterialOverrideEntry>,
+    #[serde(default)]
+    texture_bindings: Vec<MaterialTextureBindingEntry>,
     #[serde(default = "default_next_object_id")]
     next_object_id: u64,
 }
@@ -86,6 +102,13 @@ pub struct RuntimeObject {
     pub root_entity: Option<Entity>,
     pub center: [f32; 3],
     pub extent: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaterialTextureBindingEntry {
+    pub object_id: u64,
+    pub material_slot: usize,
+    pub binding: MaterialTextureBindingData,
 }
 
 #[derive(Default)]
@@ -120,6 +143,7 @@ impl SceneState {
         Self {
             objects: Vec::new(),
             material_overrides: Vec::new(),
+            texture_bindings: Vec::new(),
             next_object_id: default_next_object_id(),
         }
     }
@@ -162,6 +186,10 @@ impl SceneState {
         &self.material_overrides
     }
 
+    pub fn texture_bindings(&self) -> &[MaterialTextureBindingEntry] {
+        &self.texture_bindings
+    }
+
     pub fn set_material_override(
         &mut self,
         object_id: u64,
@@ -189,6 +217,27 @@ impl SceneState {
             material_slot: Some(material_slot),
             material_name,
             data,
+        });
+    }
+
+    pub fn set_texture_binding(
+        &mut self,
+        object_id: u64,
+        material_slot: usize,
+        binding: MaterialTextureBindingData,
+    ) {
+        if let Some(existing) = self.texture_bindings.iter_mut().find(|entry| {
+            entry.object_id == object_id
+                && entry.material_slot == material_slot
+                && entry.binding.texture_param == binding.texture_param
+        }) {
+            existing.binding = binding;
+            return;
+        }
+        self.texture_bindings.push(MaterialTextureBindingEntry {
+            object_id,
+            material_slot,
+            binding,
         });
     }
 

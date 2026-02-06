@@ -6,7 +6,7 @@ use crate::filament::Entity;
 use crate::render::{CameraController, CameraMovement, RenderContext, RenderError};
 use crate::scene::{
     compose_transform_matrix, DirectionalLightData, EnvironmentData, MaterialOverrideData,
-    RuntimeObject, SceneObjectKind, SceneRuntime, SceneState,
+    MaterialTextureBindingData, RuntimeObject, SceneObjectKind, SceneRuntime, SceneState,
 };
 use crate::ui::{MaterialParams, UiState};
 use input::InputState;
@@ -44,6 +44,12 @@ enum SceneCommand {
         material_slot: usize,
         material_name: String,
         data: MaterialOverrideData,
+    },
+    #[allow(dead_code)]
+    SetMaterialTextureBinding {
+        object_id: u64,
+        material_slot: usize,
+        binding: MaterialTextureBindingData,
     },
     TransformNode {
         index: usize,
@@ -106,6 +112,8 @@ enum CommandError {
     RenderEntityManagerUnavailable,
     #[error("render transform manager unavailable")]
     RenderTransformManagerUnavailable,
+    #[error("texture binding source path is empty")]
+    TextureBindingSourceEmpty,
 }
 
 pub struct App {
@@ -663,6 +671,11 @@ impl App {
                 &material_name,
                 data,
             ),
+            SceneCommand::SetMaterialTextureBinding {
+                object_id,
+                material_slot,
+                binding,
+            } => self.command_set_material_texture_binding(object_id, material_slot, binding),
             SceneCommand::TransformNode {
                 index,
                 position,
@@ -876,6 +889,87 @@ impl App {
                 message: format!(
                     "Material override saved but active slot not found for '{}[{}]'.",
                     asset_path, material_slot
+                ),
+            }))
+        }
+    }
+
+    fn command_set_material_texture_binding(
+        &mut self,
+        object_id: u64,
+        material_slot: usize,
+        binding: MaterialTextureBindingData,
+    ) -> Result<CommandOutcome, CommandError> {
+        if binding.source_path.trim().is_empty() {
+            return Err(CommandError::TextureBindingSourceEmpty);
+        }
+        self.scene
+            .set_texture_binding(object_id, material_slot, binding.clone());
+
+        let Some(render) = &mut self.render else {
+            return Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Info,
+                message: format!(
+                    "Stored texture binding '{}' for object {} slot {}.",
+                    binding.texture_param, object_id, material_slot
+                ),
+            }));
+        };
+
+        if !is_ktx_path(&binding.source_path) {
+            return Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!(
+                    "Stored texture binding '{}' but runtime apply currently supports only .ktx paths.",
+                    binding.texture_param
+                ),
+            }));
+        }
+
+        let (assets, render_ref) = (&mut self.assets, render);
+        let index_opt = (0..assets.material_instances().len()).find(|index| {
+            assets
+                .material_binding(*index)
+                .map(|entry| entry.object_id == object_id && entry.material_slot == material_slot)
+                .unwrap_or(false)
+        });
+        let Some(index) = index_opt else {
+            return Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!(
+                    "Stored texture binding '{}' but target material slot was not active in runtime.",
+                    binding.texture_param
+                ),
+            }));
+        };
+        let Some(material_instance) = assets.material_instances_mut().get_mut(index) else {
+            return Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!(
+                    "Stored texture binding '{}' but material instance is unavailable.",
+                    binding.texture_param
+                ),
+            }));
+        };
+        let applied = render_ref.bind_material_texture_from_ktx(
+            material_instance,
+            &binding.texture_param,
+            &binding.source_path,
+        );
+        if applied {
+            Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Info,
+                message: format!(
+                    "Applied texture binding '{}' for object {} slot {}.",
+                    binding.texture_param, object_id, material_slot
+                ),
+            }))
+        } else {
+            Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!(
+                    "Stored texture binding '{}' but runtime apply failed for '{}'.",
+                    binding.texture_param, binding.source_path
                 ),
             }))
         }
@@ -1101,6 +1195,7 @@ impl App {
         }
         self.scene_runtime.replace(runtime_objects);
         apply_scene_material_overrides_to_runtime(&self.scene, &mut self.assets);
+        apply_scene_texture_bindings_to_runtime(&self.scene, &mut self.assets, render, &mut errors);
 
         for (entity, matrix) in transforms_to_apply {
             if !render.set_entity_transform(entity, matrix) {
@@ -1372,7 +1467,8 @@ fn format_rebuild_errors(errors: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_rebuild_errors;
+    use super::{format_rebuild_errors, App, CommandError, SceneCommand};
+    use crate::scene::{MaterialTextureBindingData, MediaSourceKind};
 
     #[test]
     fn rebuild_error_format_empty_is_none() {
@@ -1387,6 +1483,41 @@ mod tests {
         ];
         let formatted = format_rebuild_errors(&errors).unwrap();
         assert_eq!(formatted, "Asset 'a.glb' failed\nEnvironment failed");
+    }
+
+    #[test]
+    fn set_material_texture_binding_requires_source_path() {
+        let mut app = App::new();
+        let result = app.execute_scene_command(SceneCommand::SetMaterialTextureBinding {
+            object_id: 1,
+            material_slot: 0,
+            binding: MaterialTextureBindingData {
+                texture_param: "baseColorMap".to_string(),
+                source_kind: MediaSourceKind::Image,
+                source_path: "  ".to_string(),
+            },
+        });
+        assert!(matches!(result, Err(CommandError::TextureBindingSourceEmpty)));
+    }
+
+    #[test]
+    fn set_material_texture_binding_persists_in_scene_state() {
+        let mut app = App::new();
+        let result = app.execute_scene_command(SceneCommand::SetMaterialTextureBinding {
+            object_id: 5,
+            material_slot: 2,
+            binding: MaterialTextureBindingData {
+                texture_param: "normalMap".to_string(),
+                source_kind: MediaSourceKind::Image,
+                source_path: "assets/textures/normal.png".to_string(),
+            },
+        });
+        assert!(result.is_ok());
+        assert_eq!(app.scene.texture_bindings().len(), 1);
+        let binding = &app.scene.texture_bindings()[0];
+        assert_eq!(binding.object_id, 5);
+        assert_eq!(binding.material_slot, 2);
+        assert_eq!(binding.binding.texture_param, "normalMap");
     }
 }
 
@@ -1507,6 +1638,67 @@ fn apply_scene_material_overrides_to_runtime(scene: &SceneState, assets: &mut As
             }
         }
     }
+}
+
+fn apply_scene_texture_bindings_to_runtime(
+    scene: &SceneState,
+    assets: &mut AssetManager,
+    render: &mut RenderContext,
+    errors: &mut Vec<String>,
+) {
+    if scene.texture_bindings().is_empty() {
+        return;
+    }
+    for entry in scene.texture_bindings() {
+        if !is_ktx_path(&entry.binding.source_path) {
+            errors.push(format!(
+                "Texture binding '{}' for object {} slot {} is '{}' (runtime currently supports .ktx only).",
+                entry.binding.texture_param,
+                entry.object_id,
+                entry.material_slot,
+                entry.binding.source_path
+            ));
+            continue;
+        }
+        let index_opt = (0..assets.material_instances().len()).find(|index| {
+            assets
+                .material_binding(*index)
+                .map(|binding| {
+                    binding.object_id == entry.object_id
+                        && binding.material_slot == entry.material_slot
+                })
+                .unwrap_or(false)
+        });
+        let Some(index) = index_opt else {
+            errors.push(format!(
+                "Texture binding '{}' target object {} slot {} is unavailable in runtime.",
+                entry.binding.texture_param, entry.object_id, entry.material_slot
+            ));
+            continue;
+        };
+        let Some(material_instance) = assets.material_instances_mut().get_mut(index) else {
+            errors.push(format!(
+                "Texture binding '{}' target material instance index {} unavailable.",
+                entry.binding.texture_param, index
+            ));
+            continue;
+        };
+        let applied = render.bind_material_texture_from_ktx(
+            material_instance,
+            &entry.binding.texture_param,
+            &entry.binding.source_path,
+        );
+        if !applied {
+            errors.push(format!(
+                "Texture binding '{}' failed to apply from '{}'.",
+                entry.binding.texture_param, entry.binding.source_path
+            ));
+        }
+    }
+}
+
+fn is_ktx_path(path: &str) -> bool {
+    path.trim().to_ascii_lowercase().ends_with(".ktx")
 }
 
 fn material_params_to_override(params: MaterialParams) -> MaterialOverrideData {

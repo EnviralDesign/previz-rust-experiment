@@ -26,8 +26,8 @@ pub fn load_scene_from_file(path: &Path) -> Result<SceneState> {
 #[cfg(test)]
 mod tests {
     use crate::scene::{
-        AssetData, DirectionalLightData, EnvironmentData, MaterialOverrideData, SceneObject,
-        SceneObjectKind, SceneState,
+        AssetData, DirectionalLightData, EnvironmentData, MaterialOverrideData,
+        MaterialTextureBindingData, MediaSourceKind, SceneObject, SceneObjectKind, SceneState,
     };
 
     #[test]
@@ -190,5 +190,29 @@ mod tests {
         assert_eq!(entry.data.metallic, 0.8);
         assert_eq!(entry.data.roughness, 0.25);
         assert_eq!(entry.data.emissive_rgb, [0.1, 0.0, 0.2]);
+    }
+
+    #[test]
+    fn test_texture_bindings_roundtrip() {
+        let mut scene = SceneState::new();
+        scene.set_texture_binding(
+            7,
+            0,
+            MaterialTextureBindingData {
+                texture_param: "baseColorMap".to_string(),
+                source_kind: MediaSourceKind::Image,
+                source_path: "assets/textures/albedo.png".to_string(),
+            },
+        );
+
+        let json = serde_json::to_string_pretty(&scene).unwrap();
+        let loaded: SceneState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.texture_bindings().len(), 1);
+        let entry = &loaded.texture_bindings()[0];
+        assert_eq!(entry.object_id, 7);
+        assert_eq!(entry.material_slot, 0);
+        assert_eq!(entry.binding.texture_param, "baseColorMap");
+        assert_eq!(entry.binding.source_kind, MediaSourceKind::Image);
+        assert_eq!(entry.binding.source_path, "assets/textures/albedo.png");
     }
 }
