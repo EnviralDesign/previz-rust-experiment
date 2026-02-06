@@ -95,6 +95,10 @@ enum CommandError {
     SceneObjectNotTransformable { index: usize },
     #[error("scene object at index {index} is not a directional light")]
     SceneObjectNotDirectionalLight { index: usize },
+    #[error("render entity manager unavailable")]
+    RenderEntityManagerUnavailable,
+    #[error("render transform manager unavailable")]
+    RenderTransformManagerUnavailable,
 }
 
 pub struct App {
@@ -298,15 +302,13 @@ impl App {
             .scene
             .object_names()
             .into_iter()
-            .map(|name| CString::new(name).unwrap_or_else(|_| CString::new("Object").unwrap()))
+            .map(sanitize_cstring)
             .collect();
         let material_names: Vec<CString> = self
             .assets
             .material_names()
             .iter()
-            .map(|name| {
-                CString::new(name.as_str()).unwrap_or_else(|_| CString::new("Material").unwrap())
-            })
+            .map(|name| sanitize_cstring(name))
             .collect();
         let mut selected_index = Self::selection_to_ui_index(self.selection);
         let mut position = [0.0f32; 3];
@@ -639,7 +641,9 @@ impl App {
         };
 
         let (engine, scene) = render.engine_scene_mut();
-        let mut entity_manager = engine.entity_manager();
+        let mut entity_manager = engine
+            .entity_manager()
+            .ok_or(CommandError::RenderEntityManagerUnavailable)?;
         log::info!("Loading glTF: {}", path);
         let loaded = self
             .assets
@@ -674,7 +678,9 @@ impl App {
             return Err(CommandError::RenderNotInitialized);
         };
         let (engine, scene) = render.engine_scene_mut();
-        let mut entity_manager = engine.entity_manager();
+        let mut entity_manager = engine
+            .entity_manager()
+            .ok_or(CommandError::RenderEntityManagerUnavailable)?;
         let light_entity = engine.create_directional_light(
             &mut entity_manager,
             data.color,
@@ -804,7 +810,9 @@ impl App {
             return Err(CommandError::RenderNotInitialized);
         };
         let matrix = compose_transform_matrix(position, rotation_deg, scale);
-        render.set_entity_transform(entity, matrix);
+        if !render.set_entity_transform(entity, matrix) {
+            return Err(CommandError::RenderTransformManagerUnavailable);
+        }
         Ok(CommandOutcome::None)
     }
 
@@ -912,7 +920,9 @@ impl App {
 
         {
             let (engine, scene) = render.engine_scene_mut();
-            let mut entity_manager = engine.entity_manager();
+            let Some(mut entity_manager) = engine.entity_manager() else {
+                return Err("Entity manager unavailable during runtime rebuild.".to_string());
+            };
             log::info!(
                 "Rebuilding runtime scene from {} serialized objects",
                 source_objects.len()
@@ -976,7 +986,12 @@ impl App {
         self.scene_runtime.replace(runtime_objects);
 
         for (entity, matrix) in transforms_to_apply {
-            render.set_entity_transform(entity, matrix);
+            if !render.set_entity_transform(entity, matrix) {
+                errors.push(format!(
+                    "Transform manager unavailable while applying transform to entity {}.",
+                    entity.id
+                ));
+            }
         }
         if let Some(light_entity) = active_light {
             render.set_light_entity(light_entity);
@@ -1631,11 +1646,34 @@ pub fn run() {
     log::info!("🚀 Previz - Filament v1.69.0 Renderer POC");
     log::info!("   Press ESC or close window to exit");
 
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
+    let event_loop = match EventLoop::new() {
+        Ok(loop_) => loop_,
+        Err(err) => {
+            let message = format!("Failed to create event loop: {err}");
+            log::error!("{message}");
+            let _ = rfd::MessageDialog::new()
+                .set_title("Previz Startup Error")
+                .set_description(&message)
+                .show();
+            return;
+        }
+    };
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::new();
-    event_loop.run_app(&mut app).expect("Event loop error");
+    if let Err(err) = event_loop.run_app(&mut app) {
+        let message = format!("Event loop error: {err}");
+        log::error!("{message}");
+        let _ = rfd::MessageDialog::new()
+            .set_title("Previz Runtime Error")
+            .set_description(&message)
+            .show();
+    }
 
     log::info!("👋 Goodbye!");
+}
+
+fn sanitize_cstring(value: &str) -> CString {
+    let cleaned = value.replace('\0', " ");
+    CString::new(cleaned).unwrap_or_default()
 }

@@ -167,22 +167,18 @@ impl Engine {
     }
 
     /// Get the entity manager
-    pub fn entity_manager(&mut self) -> EntityManager {
+    pub fn entity_manager(&mut self) -> Option<EntityManager> {
         unsafe {
             let ptr = ffi::filament_engine_get_entity_manager(self.ptr.as_ptr() as *mut _);
-            EntityManager {
-                ptr: NonNull::new(ptr as *mut c_void).expect("EntityManager is null"),
-            }
+            NonNull::new(ptr as *mut c_void).map(|ptr| EntityManager { ptr })
         }
     }
 
     /// Get the transform manager
-    pub fn transform_manager(&mut self) -> TransformManager {
+    pub fn transform_manager(&mut self) -> Option<TransformManager> {
         unsafe {
             let ptr = ffi::filament_engine_get_transform_manager(self.ptr.as_ptr() as *mut _);
-            TransformManager {
-                ptr: NonNull::new(ptr as *mut c_void).expect("TransformManager is null"),
-            }
+            NonNull::new(ptr as *mut c_void).map(|ptr| TransformManager { ptr })
         }
     }
 
@@ -239,7 +235,13 @@ impl Engine {
         ktx_path: &str,
         intensity: f32,
     ) -> Option<(IndirectLight, Texture)> {
-        let c_path = CString::new(ktx_path).expect("Invalid KTX path");
+        let c_path = match CString::new(ktx_path) {
+            Ok(path) => path,
+            Err(_) => {
+                log::warn!("Invalid KTX path (contains NUL byte).");
+                return None;
+            }
+        };
         unsafe {
             let mut texture_ptr: *mut c_void = std::ptr::null_mut();
             let light_ptr = ffi::filament_create_indirect_light_from_ktx(
@@ -262,7 +264,13 @@ impl Engine {
 
     /// Create a skybox from a KTX cubemap.
     pub fn create_skybox_from_ktx(&mut self, ktx_path: &str) -> Option<(Skybox, Texture)> {
-        let c_path = CString::new(ktx_path).expect("Invalid KTX path");
+        let c_path = match CString::new(ktx_path) {
+            Ok(path) => path,
+            Err(_) => {
+                log::warn!("Invalid KTX path (contains NUL byte).");
+                return None;
+            }
+        };
         unsafe {
             let mut texture_ptr: *mut c_void = std::ptr::null_mut();
             let skybox_ptr = ffi::filament_create_skybox_from_ktx(
@@ -784,7 +792,13 @@ impl MaterialInstance {
     }
 
     pub fn has_parameter(&self, name: &str) -> bool {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return false;
+            }
+        };
         unsafe {
             ffi::filament_material_instance_has_parameter(
                 self.ptr.as_ptr() as *mut _,
@@ -794,7 +808,13 @@ impl MaterialInstance {
     }
 
     pub fn set_float(&mut self, name: &str, value: f32) {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return;
+            }
+        };
         unsafe {
             ffi::filament_material_instance_set_float(
                 self.ptr.as_ptr() as *mut _,
@@ -805,7 +825,13 @@ impl MaterialInstance {
     }
 
     pub fn set_float3(&mut self, name: &str, value: [f32; 3]) {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return;
+            }
+        };
         unsafe {
             ffi::filament_material_instance_set_float3(
                 self.ptr.as_ptr() as *mut _,
@@ -818,7 +844,13 @@ impl MaterialInstance {
     }
 
     pub fn set_float4(&mut self, name: &str, value: [f32; 4]) {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return;
+            }
+        };
         unsafe {
             ffi::filament_material_instance_set_float4(
                 self.ptr.as_ptr() as *mut _,
@@ -832,7 +864,13 @@ impl MaterialInstance {
     }
 
     pub fn get_float(&self, name: &str) -> Option<f32> {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return None;
+            }
+        };
         let mut value = 0.0f32;
         let ok = unsafe {
             ffi::filament_material_instance_get_float(
@@ -849,7 +887,13 @@ impl MaterialInstance {
     }
 
     pub fn get_float3(&self, name: &str) -> Option<[f32; 3]> {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return None;
+            }
+        };
         let mut value = [0.0f32; 3];
         let ok = unsafe {
             ffi::filament_material_instance_get_float3(
@@ -866,7 +910,13 @@ impl MaterialInstance {
     }
 
     pub fn get_float4(&self, name: &str) -> Option<[f32; 4]> {
-        let c_name = CString::new(name).expect("Invalid parameter name");
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid parameter name (contains NUL byte).");
+                return None;
+            }
+        };
         let mut value = [0.0f32; 4];
         let ok = unsafe {
             ffi::filament_material_instance_get_float4(
@@ -990,7 +1040,16 @@ impl GltfResourceLoader {
         gltf_path: Option<&str>,
         normalize_skinning_weights: bool,
     ) -> Option<Self> {
-        let c_path = gltf_path.map(|path| CString::new(path).expect("Invalid gltf path"));
+        let c_path = match gltf_path {
+            Some(path) => match CString::new(path) {
+                Ok(path) => Some(path),
+                Err(_) => {
+                    log::warn!("Invalid glTF path (contains NUL byte).");
+                    return None;
+                }
+            },
+            None => None,
+        };
         let path_ptr = c_path
             .as_ref()
             .map(|path| path.as_ptr())
@@ -1006,7 +1065,13 @@ impl GltfResourceLoader {
     }
 
     pub fn add_texture_provider(&mut self, mime_type: &str, provider: &mut GltfTextureProvider) {
-        let c_mime = CString::new(mime_type).expect("Invalid mime type");
+        let c_mime = match CString::new(mime_type) {
+            Ok(mime) => mime,
+            Err(_) => {
+                log::warn!("Invalid mime type (contains NUL byte).");
+                return;
+            }
+        };
         unsafe {
             ffi::filament_gltfio_resource_loader_add_texture_provider(
                 self.ptr.as_ptr() as *mut _,
@@ -1125,7 +1190,16 @@ pub struct ImGuiHelper {
 
 impl ImGuiHelper {
     pub fn create(engine: &mut Engine, view: &mut View, font_path: Option<&str>) -> Option<Self> {
-        let c_path = font_path.map(|path| CString::new(path).expect("Invalid font path"));
+        let c_path = match font_path {
+            Some(path) => match CString::new(path) {
+                Ok(path) => Some(path),
+                Err(_) => {
+                    log::warn!("Invalid font path (contains NUL byte).");
+                    return None;
+                }
+            },
+            None => None,
+        };
         let path_ptr = c_path
             .as_ref()
             .map(|path| path.as_ptr())
@@ -1161,8 +1235,20 @@ impl ImGuiHelper {
     }
 
     pub fn render_text(&mut self, delta_seconds: f32, title: &str, body: &str) {
-        let c_title = CString::new(title).expect("Invalid title");
-        let c_body = CString::new(body).expect("Invalid body");
+        let c_title = match CString::new(title) {
+            Ok(title) => title,
+            Err(_) => {
+                log::warn!("Invalid UI title text (contains NUL byte).");
+                return;
+            }
+        };
+        let c_body = match CString::new(body) {
+            Ok(body) => body,
+            Err(_) => {
+                log::warn!("Invalid UI body text (contains NUL byte).");
+                return;
+            }
+        };
         unsafe {
             ffi::filagui_imgui_helper_render_text(
                 self.ptr.as_ptr() as *mut _,
@@ -1180,8 +1266,20 @@ impl ImGuiHelper {
     }
 
     pub fn render_overlay(&mut self, delta_seconds: f32, title: &str, body: &str) {
-        let c_title = CString::new(title).expect("Invalid title");
-        let c_body = CString::new(body).expect("Invalid body");
+        let c_title = match CString::new(title) {
+            Ok(title) => title,
+            Err(_) => {
+                log::warn!("Invalid UI title text (contains NUL byte).");
+                return;
+            }
+        };
+        let c_body = match CString::new(body) {
+            Ok(body) => body,
+            Err(_) => {
+                log::warn!("Invalid UI body text (contains NUL byte).");
+                return;
+            }
+        };
         unsafe {
             ffi::filagui_imgui_helper_render_overlay(
                 self.ptr.as_ptr() as *mut _,
@@ -1225,8 +1323,20 @@ impl ImGuiHelper {
         save_scene: &mut bool,
         load_scene: &mut bool,
     ) {
-        let c_title = CString::new(assets_title).expect("Invalid title");
-        let c_body = CString::new(assets_body).expect("Invalid body");
+        let c_title = match CString::new(assets_title) {
+            Ok(title) => title,
+            Err(_) => {
+                log::warn!("Invalid scene UI title text (contains NUL byte).");
+                return;
+            }
+        };
+        let c_body = match CString::new(assets_body) {
+            Ok(body) => body,
+            Err(_) => {
+                log::warn!("Invalid scene UI body text (contains NUL byte).");
+                return;
+            }
+        };
         let names_ptr = if object_names.is_empty() {
             std::ptr::null()
         } else {

@@ -32,6 +32,8 @@ pub enum RenderError {
     ViewCreateFailed,
     #[error("failed to create Filament camera")]
     CameraCreateFailed,
+    #[error("failed to access Filament entity manager")]
+    EntityManagerUnavailable,
     #[error("failed to create UI view")]
     UiViewCreateFailed,
     #[error("failed to create ImGui helper")]
@@ -72,7 +74,9 @@ impl RenderContext {
         let mut scene = engine.create_scene().ok_or(RenderError::SceneCreateFailed)?;
         let mut view = engine.create_view().ok_or(RenderError::ViewCreateFailed)?;
 
-        let mut entity_manager = engine.entity_manager();
+        let mut entity_manager = engine
+            .entity_manager()
+            .ok_or(RenderError::EntityManagerUnavailable)?;
         let camera_entity = entity_manager.create();
         let mut camera = engine
             .create_camera(camera_entity)
@@ -299,9 +303,13 @@ impl RenderContext {
         self.selected_entity = entity;
     }
 
-    pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) {
-        let mut tm = self.engine.transform_manager();
+    pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) -> bool {
+        let Some(mut tm) = self.engine.transform_manager() else {
+            log::warn!("Transform manager unavailable; skipping entity transform update.");
+            return false;
+        };
         tm.set_transform(entity, &matrix4x4);
+        true
     }
 
     pub fn set_environment(&mut self, ibl_path: &str, skybox_path: &str, intensity: f32) -> bool {

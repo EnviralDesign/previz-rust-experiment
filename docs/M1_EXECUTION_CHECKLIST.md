@@ -39,7 +39,7 @@ Goal:
 
 ## 3. Error and Diagnostics
 
-- [ ] Replace remaining panic-prone user-triggered paths with structured errors. (partial)
+- [x] Replace remaining panic-prone user-triggered paths with structured errors.
 - [x] Add concise UI-visible status for command failures and partial rebuild failures.
 - [x] Add logging around load/rebuild phases with object counts and per-object failure context.
 
