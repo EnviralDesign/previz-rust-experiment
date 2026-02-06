@@ -141,6 +141,17 @@ pub struct App {
     render: Option<RenderContext>,
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // Drop asset-owned material instances before render-owned textures.
+        self.assets = AssetManager::new();
+        if let Some(render) = &mut self.render {
+            render.flush_and_wait();
+        }
+        self.render = None;
+    }
+}
+
 impl App {
     fn new() -> Self {
         Self {
@@ -403,6 +414,9 @@ impl App {
         let previous_environment_intensity = self.ui.environment_intensity();
         let mut environment_apply = false;
         let mut environment_generate = false;
+        let mut environment_pick_hdr = false;
+        let mut environment_pick_ibl = false;
+        let mut environment_pick_skybox = false;
         let mut create_gltf = false;
         let mut create_light = false;
         let mut create_environment = false;
@@ -410,6 +424,8 @@ impl App {
         let mut load_scene = false;
         let mut material_pick_texture = false;
         let mut material_apply_texture = false;
+        let (mut material_wrap_repeat_u, mut material_wrap_repeat_v) =
+            self.ui.material_wrap_repeat();
         let mut pending_transform_command: Option<SceneCommand> = None;
         let mut pending_update_light_command: Option<SceneCommand> = None;
         let mut pending_update_environment_command: Option<SceneCommand> = None;
@@ -417,9 +433,9 @@ impl App {
         let (
             material_texture_param_string,
             material_texture_source_string,
-            hdr_path_string,
-            ibl_path_string,
-            skybox_path_string,
+            mut hdr_path_string,
+            mut ibl_path_string,
+            mut skybox_path_string,
         ) = {
             let (material_texture_param, material_texture_source, hdr_path, ibl_path, skybox_path) =
                 self.ui.texture_and_environment_paths_mut();
@@ -454,11 +470,16 @@ impl App {
                     &mut material_params.emissive_rgb,
                     material_texture_param,
                     material_texture_source,
+                    &mut material_wrap_repeat_u,
+                    &mut material_wrap_repeat_v,
                     &mut material_pick_texture,
                     &mut material_apply_texture,
                     hdr_path,
                     ibl_path,
                     skybox_path,
+                    &mut environment_pick_hdr,
+                    &mut environment_pick_ibl,
+                    &mut environment_pick_skybox,
                     &mut environment_intensity,
                     &mut environment_apply,
                     &mut environment_generate,
@@ -489,6 +510,8 @@ impl App {
         self.ui
             .set_selected_material_index(selected_material_global_index);
         self.ui.set_material_params(material_params);
+        self.ui
+            .set_material_wrap_repeat(material_wrap_repeat_u, material_wrap_repeat_v);
         self.ui.set_environment_intensity(environment_intensity);
         let selected_runtime_entity = self
             .current_selection_index()
@@ -595,6 +618,37 @@ impl App {
                 {
                     self.ui.set_material_params(params);
                 }
+                if selected_material_global_index >= 0 {
+                    if let Some(active_binding) = self
+                        .assets
+                        .material_binding(selected_material_global_index as usize)
+                        .cloned()
+                    {
+                        let desired_param = material_texture_param_string.trim();
+                        let matched = self.scene.texture_bindings().iter().find(|entry| {
+                            entry.object_id == active_binding.object_id
+                                && entry.material_slot == active_binding.material_slot
+                                && entry.binding.texture_param == desired_param
+                        });
+                        let fallback = self.scene.texture_bindings().iter().find(|entry| {
+                            entry.object_id == active_binding.object_id
+                                && entry.material_slot == active_binding.material_slot
+                        });
+                        if let Some(entry) = matched.or(fallback) {
+                            let (param_buf, source_buf) = self.ui.material_texture_binding_mut();
+                            write_string_to_buffer(&entry.binding.texture_param, param_buf);
+                            write_string_to_buffer(&entry.binding.source_path, source_buf);
+                            self.ui.set_material_wrap_repeat(
+                                entry.binding.wrap_repeat_u,
+                                entry.binding.wrap_repeat_v,
+                            );
+                        } else {
+                            let (_param_buf, source_buf) = self.ui.material_texture_binding_mut();
+                            write_string_to_buffer("", source_buf);
+                            self.ui.set_material_wrap_repeat(true, true);
+                        }
+                    }
+                }
             }
 
         }
@@ -639,6 +693,8 @@ impl App {
                     match prepare_texture_binding_data(
                         &material_texture_param_string,
                         effective_source,
+                        material_wrap_repeat_u,
+                        material_wrap_repeat_v,
                     ) {
                         Ok(texture_binding) => {
                             let result = self.execute_scene_command(
@@ -660,6 +716,47 @@ impl App {
                             ));
                         }
                     }
+                }
+            }
+        }
+        if environment_pick_hdr {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("HDR", &["hdr"])
+                .pick_file()
+            {
+                if let Some(path_string) = path.to_str() {
+                    hdr_path_string = path_string.to_string();
+                    let (_tex_param, _tex_source, hdr_buf, _ibl_buf, _sky_buf) =
+                        self.ui.texture_and_environment_paths_mut();
+                    write_string_to_buffer(path_string, hdr_buf);
+                }
+            }
+        }
+        if environment_pick_ibl {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("KTX", &["ktx"])
+                .pick_file()
+            {
+                if let Some(path_string) = path.to_str() {
+                    ibl_path_string = path_string.to_string();
+                    let (_tex_param, _tex_source, _hdr_buf, ibl_buf, _sky_buf) =
+                        self.ui.texture_and_environment_paths_mut();
+                    write_string_to_buffer(path_string, ibl_buf);
+                    environment_apply = true;
+                }
+            }
+        }
+        if environment_pick_skybox {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("KTX", &["ktx"])
+                .pick_file()
+            {
+                if let Some(path_string) = path.to_str() {
+                    skybox_path_string = path_string.to_string();
+                    let (_tex_param, _tex_source, _hdr_buf, _ibl_buf, sky_buf) =
+                        self.ui.texture_and_environment_paths_mut();
+                    write_string_to_buffer(path_string, sky_buf);
+                    environment_apply = true;
                 }
             }
         }
@@ -1021,6 +1118,8 @@ impl App {
             material_instance,
             &binding.texture_param,
             &runtime_path,
+            binding.wrap_repeat_u,
+            binding.wrap_repeat_v,
         );
         if applied {
             Ok(CommandOutcome::Notice(CommandNotice {
@@ -1563,6 +1662,8 @@ mod tests {
                 source_path: "  ".to_string(),
                 runtime_ktx_path: None,
                 source_hash: None,
+                wrap_repeat_u: true,
+                wrap_repeat_v: true,
             },
         });
         assert!(matches!(result, Err(CommandError::TextureBindingSourceEmpty)));
@@ -1580,6 +1681,8 @@ mod tests {
                 source_path: "assets/textures/normal.png".to_string(),
                 runtime_ktx_path: None,
                 source_hash: None,
+                wrap_repeat_u: true,
+                wrap_repeat_v: true,
             },
         });
         assert!(result.is_ok());
@@ -1662,6 +1765,8 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
 fn prepare_texture_binding_data(
     texture_param: &str,
     source_path: &str,
+    wrap_repeat_u: bool,
+    wrap_repeat_v: bool,
 ) -> Result<MaterialTextureBindingData, String> {
     let texture_param = texture_param.trim();
     if texture_param.is_empty() {
@@ -1681,6 +1786,8 @@ fn prepare_texture_binding_data(
         source_path: source_path.to_string(),
         runtime_ktx_path: Some(runtime_ktx_path),
         source_hash: Some(source_hash),
+        wrap_repeat_u,
+        wrap_repeat_v,
     })
 }
 
@@ -1885,6 +1992,8 @@ fn apply_scene_texture_bindings_to_runtime(
             material_instance,
             &entry.binding.texture_param,
             &runtime_path,
+            entry.binding.wrap_repeat_u,
+            entry.binding.wrap_repeat_v,
         );
         if !applied {
             errors.push(format!(

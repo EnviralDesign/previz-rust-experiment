@@ -225,11 +225,16 @@ impl RenderContext {
         material_emissive_rgb: &mut [f32; 3],
         material_texture_param: &mut [u8],
         material_texture_source: &mut [u8],
+        material_wrap_repeat_u: &mut bool,
+        material_wrap_repeat_v: &mut bool,
         material_pick_texture: &mut bool,
         material_apply_texture: &mut bool,
         hdr_path: &mut [u8],
         ibl_path: &mut [u8],
         skybox_path: &mut [u8],
+        environment_pick_hdr: &mut bool,
+        environment_pick_ibl: &mut bool,
+        environment_pick_skybox: &mut bool,
         environment_intensity: &mut f32,
         environment_apply: &mut bool,
         environment_generate: &mut bool,
@@ -268,11 +273,16 @@ impl RenderContext {
                 material_emissive_rgb,
                 material_texture_param,
                 material_texture_source,
+                material_wrap_repeat_u,
+                material_wrap_repeat_v,
                 material_pick_texture,
                 material_apply_texture,
                 hdr_path,
                 ibl_path,
                 skybox_path,
+                environment_pick_hdr,
+                environment_pick_ibl,
+                environment_pick_skybox,
                 environment_intensity,
                 environment_apply,
                 environment_generate,
@@ -327,10 +337,18 @@ impl RenderContext {
         material_instance: &mut MaterialInstance,
         texture_param: &str,
         ktx_path: &str,
+        wrap_repeat_u: bool,
+        wrap_repeat_v: bool,
     ) -> bool {
         let Some(texture) = self
             .engine
-            .bind_material_texture_from_ktx(material_instance, texture_param, ktx_path)
+            .bind_material_texture_from_ktx(
+                material_instance,
+                texture_param,
+                ktx_path,
+                wrap_repeat_u,
+                wrap_repeat_v,
+            )
         else {
             return false;
         };

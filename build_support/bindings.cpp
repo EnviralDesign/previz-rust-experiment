@@ -492,6 +492,8 @@ bool filament_material_instance_set_texture_from_ktx(
     MaterialInstance* instance,
     const char* name,
     const char* ktx_path,
+    bool wrap_repeat_u,
+    bool wrap_repeat_v,
     Texture** out_texture
 ) {
     if (!engine || !instance || !name || !ktx_path || !out_texture) {
@@ -510,7 +512,14 @@ bool filament_material_instance_set_texture_from_ktx(
     if (!texture) {
         return false;
     }
-    instance->setParameter(name, texture, TextureSampler());
+    TextureSampler sampler;
+    sampler.setWrapModeS(
+        wrap_repeat_u ? TextureSampler::WrapMode::REPEAT : TextureSampler::WrapMode::CLAMP_TO_EDGE
+    );
+    sampler.setWrapModeT(
+        wrap_repeat_v ? TextureSampler::WrapMode::REPEAT : TextureSampler::WrapMode::CLAMP_TO_EDGE
+    );
+    instance->setParameter(name, texture, sampler);
     *out_texture = texture;
     return true;
 }
@@ -1123,6 +1132,8 @@ void filagui_imgui_helper_render_scene_ui(
     int material_texture_param_capacity,
     char* material_texture_source,
     int material_texture_source_capacity,
+    bool* material_wrap_repeat_u,
+    bool* material_wrap_repeat_v,
     bool* material_pick_texture,
     bool* material_apply_texture,
     char* hdr_path,
@@ -1131,6 +1142,9 @@ void filagui_imgui_helper_render_scene_ui(
     int ibl_path_capacity,
     char* skybox_path,
     int skybox_path_capacity,
+    bool* environment_pick_hdr,
+    bool* environment_pick_ibl,
+    bool* environment_pick_skybox,
     float* environment_intensity,
     bool* environment_apply,
     bool* environment_generate,
@@ -1330,18 +1344,33 @@ void filagui_imgui_helper_render_scene_ui(
             }
             ImGui::Separator();
             if (material_texture_param && material_texture_param_capacity > 0) {
+                ImGui::TextUnformatted("Texture Param (Advanced)");
                 ImGui::InputText(
-                    "Texture Param",
+                    "##TextureParam",
                     material_texture_param,
                     (size_t)material_texture_param_capacity
                 );
+                if (material_texture_param_capacity > 0) {
+                    if (ImGui::Button("Base Color")) {
+                        std::snprintf(material_texture_param, (size_t)material_texture_param_capacity, "%s", "baseColorMap");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Normal")) {
+                        std::snprintf(material_texture_param, (size_t)material_texture_param_capacity, "%s", "normalMap");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Emissive")) {
+                        std::snprintf(material_texture_param, (size_t)material_texture_param_capacity, "%s", "emissiveMap");
+                    }
+                }
             }
             if (material_texture_source && material_texture_source_capacity > 0) {
+                ImGui::TextUnformatted("Texture Source");
                 float button_w = 32.0f;
                 float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
                 ImGui::SetNextItemWidth(-button_w - spacing);
                 ImGui::InputText(
-                    "Texture Source",
+                    "##TextureSource",
                     material_texture_source,
                     (size_t)material_texture_source_capacity
                 );
@@ -1353,9 +1382,15 @@ void filagui_imgui_helper_render_scene_ui(
                     }
                 }
             }
+            if (material_wrap_repeat_u) {
+                ImGui::Checkbox("Wrap U Repeat", material_wrap_repeat_u);
+            }
+            if (material_wrap_repeat_v) {
+                ImGui::Checkbox("Wrap V Repeat", material_wrap_repeat_v);
+            }
             if (material_apply_texture) {
                 *material_apply_texture = false;
-                if (ImGui::Button("Apply Texture Binding", ImVec2(-1, 0))) {
+                if (ImGui::Button("Apply From Fields", ImVec2(-1, 0))) {
                     *material_apply_texture = true;
                 }
             }
@@ -1366,14 +1401,43 @@ void filagui_imgui_helper_render_scene_ui(
 
         bool show_environment = selected_kind && *selected_kind == 2;
         if (show_environment && ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen)) {
+            float button_w = 32.0f;
+            float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
             if (hdr_path && hdr_path_capacity > 0) {
-                ImGui::InputText("Equirect HDR", hdr_path, (size_t)hdr_path_capacity);
+                ImGui::TextUnformatted("Equirect HDR");
+                ImGui::SetNextItemWidth(-button_w - spacing);
+                ImGui::InputText("##EnvHdr", hdr_path, (size_t)hdr_path_capacity);
+                if (environment_pick_hdr) {
+                    ImGui::SameLine();
+                    *environment_pick_hdr = false;
+                    if (ImGui::Button("...##PickHdr", ImVec2(button_w, 0))) {
+                        *environment_pick_hdr = true;
+                    }
+                }
             }
             if (ibl_path && ibl_path_capacity > 0) {
-                ImGui::InputText("IBL KTX", ibl_path, (size_t)ibl_path_capacity);
+                ImGui::TextUnformatted("IBL KTX");
+                ImGui::SetNextItemWidth(-button_w - spacing);
+                ImGui::InputText("##EnvIbl", ibl_path, (size_t)ibl_path_capacity);
+                if (environment_pick_ibl) {
+                    ImGui::SameLine();
+                    *environment_pick_ibl = false;
+                    if (ImGui::Button("...##PickIbl", ImVec2(button_w, 0))) {
+                        *environment_pick_ibl = true;
+                    }
+                }
             }
             if (skybox_path && skybox_path_capacity > 0) {
-                ImGui::InputText("Skybox KTX", skybox_path, (size_t)skybox_path_capacity);
+                ImGui::TextUnformatted("Skybox KTX");
+                ImGui::SetNextItemWidth(-button_w - spacing);
+                ImGui::InputText("##EnvSkybox", skybox_path, (size_t)skybox_path_capacity);
+                if (environment_pick_skybox) {
+                    ImGui::SameLine();
+                    *environment_pick_skybox = false;
+                    if (ImGui::Button("...##PickSkybox", ImVec2(button_w, 0))) {
+                        *environment_pick_skybox = true;
+                    }
+                }
             }
             if (environment_intensity) {
                 ImGui::SliderFloat("Intensity", environment_intensity, 0.0f, 200000.0f, "%.1f");

@@ -257,6 +257,7 @@ impl Engine {
             let texture = NonNull::new(texture_ptr).map(|ptr| Texture {
                 ptr,
                 engine: self.ptr,
+                owned: true,
             })?;
             Some((light, texture))
         }
@@ -285,6 +286,7 @@ impl Engine {
             let texture = NonNull::new(texture_ptr).map(|ptr| Texture {
                 ptr,
                 engine: self.ptr,
+                owned: true,
             })?;
             Some((skybox, texture))
         }
@@ -295,6 +297,8 @@ impl Engine {
         material_instance: &mut MaterialInstance,
         param_name: &str,
         ktx_path: &str,
+        wrap_repeat_u: bool,
+        wrap_repeat_v: bool,
     ) -> Option<Texture> {
         let c_param = match CString::new(param_name) {
             Ok(name) => name,
@@ -317,6 +321,8 @@ impl Engine {
                 material_instance.ptr.as_ptr() as *mut _,
                 c_param.as_ptr(),
                 c_path.as_ptr(),
+                wrap_repeat_u,
+                wrap_repeat_v,
                 &mut texture_ptr as *mut *mut ffi::Texture,
             );
             if !ok {
@@ -325,6 +331,7 @@ impl Engine {
             NonNull::new(texture_ptr as *mut c_void).map(|ptr| Texture {
                 ptr,
                 engine: self.ptr,
+                owned: false,
             })
         }
     }
@@ -546,10 +553,14 @@ impl Drop for Scene {
 pub struct Texture {
     ptr: NonNull<c_void>,
     engine: NonNull<c_void>,
+    owned: bool,
 }
 
 impl Drop for Texture {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         unsafe {
             ffi::filament_engine_destroy_texture(
                 self.engine.as_ptr() as *mut _,
@@ -1352,11 +1363,16 @@ impl ImGuiHelper {
         material_emissive_rgb: &mut [f32; 3],
         material_texture_param: &mut [u8],
         material_texture_source: &mut [u8],
+        material_wrap_repeat_u: &mut bool,
+        material_wrap_repeat_v: &mut bool,
         material_pick_texture: &mut bool,
         material_apply_texture: &mut bool,
         hdr_path: &mut [u8],
         ibl_path: &mut [u8],
         skybox_path: &mut [u8],
+        environment_pick_hdr: &mut bool,
+        environment_pick_ibl: &mut bool,
+        environment_pick_skybox: &mut bool,
         environment_intensity: &mut f32,
         environment_apply: &mut bool,
         environment_generate: &mut bool,
@@ -1418,6 +1434,8 @@ impl ImGuiHelper {
                 material_texture_param.len() as i32,
                 material_texture_source.as_mut_ptr() as *mut c_char,
                 material_texture_source.len() as i32,
+                material_wrap_repeat_u as *mut bool,
+                material_wrap_repeat_v as *mut bool,
                 material_pick_texture as *mut bool,
                 material_apply_texture as *mut bool,
                 hdr_path.as_mut_ptr() as *mut c_char,
@@ -1426,6 +1444,9 @@ impl ImGuiHelper {
                 ibl_path.len() as i32,
                 skybox_path.as_mut_ptr() as *mut c_char,
                 skybox_path.len() as i32,
+                environment_pick_hdr as *mut bool,
+                environment_pick_ibl as *mut bool,
+                environment_pick_skybox as *mut bool,
                 environment_intensity as *mut f32,
                 environment_apply as *mut bool,
                 environment_generate as *mut bool,

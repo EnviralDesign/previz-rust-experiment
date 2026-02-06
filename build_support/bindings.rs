@@ -237,6 +237,8 @@ extern "C" {
         instance: *mut MaterialInstance,
         name: *const c_char,
         ktx_path: *const c_char,
+        wrap_repeat_u: bool,
+        wrap_repeat_v: bool,
         out_texture: *mut *mut Texture,
     ) -> bool;
     
@@ -534,6 +536,8 @@ extern "C" {
         material_texture_param_capacity: i32,
         material_texture_source: *mut c_char,
         material_texture_source_capacity: i32,
+        material_wrap_repeat_u: *mut bool,
+        material_wrap_repeat_v: *mut bool,
         material_pick_texture: *mut bool,
         material_apply_texture: *mut bool,
         hdr_path: *mut c_char,
@@ -542,6 +546,9 @@ extern "C" {
         ibl_path_capacity: i32,
         skybox_path: *mut c_char,
         skybox_path_capacity: i32,
+        environment_pick_hdr: *mut bool,
+        environment_pick_ibl: *mut bool,
+        environment_pick_skybox: *mut bool,
         environment_intensity: *mut f32,
         environment_apply: *mut bool,
         environment_generate: *mut bool,

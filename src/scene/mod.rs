@@ -53,6 +53,10 @@ pub struct MaterialTextureBindingData {
     pub runtime_ktx_path: Option<String>,
     #[serde(default)]
     pub source_hash: Option<String>,
+    #[serde(default = "default_true")]
+    pub wrap_repeat_u: bool,
+    #[serde(default = "default_true")]
+    pub wrap_repeat_v: bool,
 }
 
 /// Maps a material identity to user-authored override values.
@@ -99,6 +103,10 @@ pub struct SceneState {
 
 fn default_next_object_id() -> u64 {
     1
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default)]

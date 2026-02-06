@@ -10,6 +10,8 @@ pub struct UiState {
     material_params: MaterialParams,
     material_texture_param: [u8; 128],
     material_texture_source: [u8; 260],
+    material_wrap_repeat_u: bool,
+    material_wrap_repeat_v: bool,
     environment_hdr_path: [u8; 260],
     environment_ibl_path: [u8; 260],
     environment_skybox_path: [u8; 260],
@@ -57,6 +59,8 @@ impl UiState {
                 buf
             },
             material_texture_source: [0u8; 260],
+            material_wrap_repeat_u: true,
+            material_wrap_repeat_v: true,
             environment_hdr_path: [0u8; 260],
             environment_ibl_path: [0u8; 260],
             environment_skybox_path: [0u8; 260],
@@ -144,6 +148,15 @@ impl UiState {
             &mut self.environment_ibl_path,
             &mut self.environment_skybox_path,
         )
+    }
+
+    pub fn material_wrap_repeat(&self) -> (bool, bool) {
+        (self.material_wrap_repeat_u, self.material_wrap_repeat_v)
+    }
+
+    pub fn set_material_wrap_repeat(&mut self, wrap_u: bool, wrap_v: bool) {
+        self.material_wrap_repeat_u = wrap_u;
+        self.material_wrap_repeat_v = wrap_v;
     }
 
     pub fn environment_paths_mut(

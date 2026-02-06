@@ -204,6 +204,8 @@ mod tests {
                 source_path: "assets/textures/albedo.png".to_string(),
                 runtime_ktx_path: Some("assets/cache/textures/albedo_hash.ktx".to_string()),
                 source_hash: Some("abc123".to_string()),
+                wrap_repeat_u: true,
+                wrap_repeat_v: false,
             },
         );
 
@@ -221,5 +223,7 @@ mod tests {
             Some("assets/cache/textures/albedo_hash.ktx")
         );
         assert_eq!(entry.binding.source_hash.as_deref(), Some("abc123"));
+        assert!(entry.binding.wrap_repeat_u);
+        assert!(!entry.binding.wrap_repeat_v);
     }
 }
