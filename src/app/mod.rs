@@ -39,6 +39,9 @@ enum SceneCommand {
         apply_runtime: bool,
     },
     SetMaterialParam {
+        object_id: u64,
+        asset_path: String,
+        material_slot: usize,
         material_name: String,
         data: MaterialOverrideData,
     },
@@ -361,10 +364,9 @@ impl App {
         let mut material_params = self.ui.material_params();
         let previous_material_selection = selected_material_index;
         let previous_material_params = material_params;
-        let original_material_name = if previous_material_selection >= 0 {
+        let original_material_binding = if previous_material_selection >= 0 {
             self.assets
-                .material_names()
-                .get(previous_material_selection as usize)
+                .material_binding(previous_material_selection as usize)
                 .cloned()
         } else {
             None
@@ -529,9 +531,12 @@ impl App {
             if selected_material_index == previous_material_selection
                 && previous_material_params != material_params
             {
-                if let Some(material_name) = original_material_name.clone() {
+                if let Some(binding) = original_material_binding.clone() {
                     pending_set_material_command = Some(SceneCommand::SetMaterialParam {
-                        material_name,
+                        object_id: binding.object_id,
+                        asset_path: binding.asset_path,
+                        material_slot: binding.material_slot,
+                        material_name: binding.material_name,
                         data: material_params_to_override(material_params),
                     });
                 }
@@ -623,9 +628,18 @@ impl App {
                 apply_runtime,
             } => self.command_set_environment(data, apply_runtime),
             SceneCommand::SetMaterialParam {
+                object_id,
+                asset_path,
+                material_slot,
                 material_name,
                 data,
-            } => self.command_set_material_param(&material_name, data),
+            } => self.command_set_material_param(
+                object_id,
+                &asset_path,
+                material_slot,
+                &material_name,
+                data,
+            ),
             SceneCommand::TransformNode {
                 index,
                 position,
@@ -668,10 +682,11 @@ impl App {
         let mut entity_manager = engine
             .entity_manager()
             .ok_or(CommandError::RenderEntityManagerUnavailable)?;
+        let object_id = self.scene.reserve_object_id();
         log::info!("Loading glTF: {}", path);
         let loaded = self
             .assets
-            .load_gltf_from_path(engine, scene, &mut entity_manager, path)
+            .load_gltf_from_path(engine, scene, &mut entity_manager, path, object_id)
             ?;
 
         log::info!(
@@ -680,7 +695,8 @@ impl App {
             loaded.center,
             loaded.extent
         );
-        self.scene.add_asset(loaded.name.clone(), path);
+        self.scene
+            .add_asset_with_id(object_id, loaded.name.clone(), path);
         self.scene_runtime.push(RuntimeObject {
             root_entity: Some(loaded.root_entity),
             center: loaded.center,
@@ -799,22 +815,34 @@ impl App {
 
     fn command_set_material_param(
         &mut self,
+        object_id: u64,
+        asset_path: &str,
+        material_slot: usize,
         material_name: &str,
         data: MaterialOverrideData,
     ) -> Result<CommandOutcome, CommandError> {
-        self.scene
-            .set_material_override(material_name.to_string(), data.clone());
+        self.scene.set_material_override(
+            object_id,
+            asset_path.to_string(),
+            material_slot,
+            material_name.to_string(),
+            data.clone(),
+        );
 
         let mut applied_any = false;
-        let material_names = self.assets.material_names().to_vec();
-        for (index, name) in material_names.iter().enumerate() {
-            if name != material_name {
+        let binding_len = self.assets.material_instances().len();
+        for index in 0..binding_len {
+            let Some(binding) = self.assets.material_binding(index) else {
+                continue;
+            };
+            if binding.object_id != object_id || binding.material_slot != material_slot {
                 continue;
             }
             if let Some(material_instance) = self.assets.material_instances_mut().get_mut(index) {
                 apply_material_override(material_instance, &data);
                 applied_any = true;
             }
+            break;
         }
 
         if applied_any {
@@ -823,8 +851,8 @@ impl App {
             Ok(CommandOutcome::Notice(CommandNotice {
                 severity: CommandSeverity::Warning,
                 message: format!(
-                    "Material override saved but no active material matched '{}'.",
-                    material_name
+                    "Material override saved but active slot not found for '{}[{}]'.",
+                    asset_path, material_slot
                 ),
             }))
         }
@@ -952,6 +980,7 @@ impl App {
         let Some(render) = &mut self.render else {
             return Ok(());
         };
+        self.scene.ensure_object_ids();
 
         // Conservative teardown order for native resource safety:
         // 1) drain GPU work
@@ -991,7 +1020,13 @@ impl App {
                         log::info!("Rehydrate asset '{}'", data.path);
                         match self
                             .assets
-                            .load_gltf_from_path(engine, scene, &mut entity_manager, &data.path)
+                            .load_gltf_from_path(
+                                engine,
+                                scene,
+                                &mut entity_manager,
+                                &data.path,
+                                object.id,
+                            )
                         {
                             Ok(loaded) => {
                                 transforms_to_apply.push((
@@ -1422,10 +1457,26 @@ fn apply_scene_material_overrides_to_runtime(scene: &SceneState, assets: &mut As
     if scene.material_overrides().is_empty() {
         return;
     }
-    let material_names = assets.material_names().to_vec();
+    let binding_count = assets.material_instances().len();
     for override_entry in scene.material_overrides() {
-        for (index, name) in material_names.iter().enumerate() {
-            if name != &override_entry.material_name {
+        let target_object_id = override_entry.object_id;
+        let target_asset_path = override_entry.asset_path.as_deref();
+        let target_slot = override_entry.material_slot;
+        for index in 0..binding_count {
+            let Some(binding) = assets.material_binding(index) else {
+                continue;
+            };
+            let matches_object_slot = target_object_id == Some(binding.object_id)
+                && target_slot == Some(binding.material_slot);
+            let matches_path_slot = target_object_id.is_none()
+                && target_asset_path == Some(binding.asset_path.as_str())
+                && target_slot == Some(binding.material_slot);
+            let matches_legacy_name = target_asset_path.is_none()
+                && target_object_id.is_none()
+                && target_slot.is_none()
+                && !override_entry.material_name.is_empty()
+                && override_entry.material_name == binding.material_name;
+            if !(matches_object_slot || matches_path_slot || matches_legacy_name) {
                 continue;
             }
             if let Some(material_instance) = assets.material_instances_mut().get_mut(index) {

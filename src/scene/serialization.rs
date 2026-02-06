@@ -42,6 +42,7 @@ mod tests {
     fn test_scene_with_light() {
         let mut scene = SceneState::new();
         scene.add_object(SceneObject {
+            id: 1,
             name: "Light".to_string(),
             kind: SceneObjectKind::DirectionalLight(DirectionalLightData {
                 color: [1.0, 1.0, 1.0],
@@ -70,6 +71,7 @@ mod tests {
     fn test_runtime_fields_are_not_serialized() {
         let mut scene = SceneState::new();
         scene.add_object(SceneObject {
+            id: 1,
             name: "Helmet".to_string(),
             kind: SceneObjectKind::Asset(AssetData {
                 path: "assets/gltf/DamagedHelmet.gltf".to_string(),
@@ -79,6 +81,7 @@ mod tests {
             }),
         });
         scene.add_object(SceneObject {
+            id: 2,
             name: "Environment".to_string(),
             kind: SceneObjectKind::Environment(EnvironmentData {
                 hdr_path: "hdr.hdr".to_string(),
@@ -101,6 +104,7 @@ mod tests {
     fn test_save_load_stress_loop_via_file() {
         let mut scene = SceneState::new();
         scene.add_object(SceneObject {
+            id: 1,
             name: "Helmet".to_string(),
             kind: SceneObjectKind::Asset(AssetData {
                 path: "assets/gltf/DamagedHelmet.gltf".to_string(),
@@ -110,6 +114,7 @@ mod tests {
             }),
         });
         scene.add_object(SceneObject {
+            id: 2,
             name: "Light".to_string(),
             kind: SceneObjectKind::DirectionalLight(DirectionalLightData {
                 color: [1.0, 1.0, 1.0],
@@ -118,6 +123,7 @@ mod tests {
             }),
         });
         scene.add_object(SceneObject {
+            id: 3,
             name: "Environment".to_string(),
             kind: SceneObjectKind::Environment(EnvironmentData {
                 hdr_path: "hdr.hdr".to_string(),
@@ -157,6 +163,9 @@ mod tests {
     fn test_material_overrides_roundtrip() {
         let mut scene = SceneState::new();
         scene.set_material_override(
+            42,
+            "assets/gltf/DamagedHelmet.gltf".to_string(),
+            0,
             "Material_MR".to_string(),
             MaterialOverrideData {
                 base_color_rgba: [0.2, 0.3, 0.4, 1.0],
@@ -170,6 +179,12 @@ mod tests {
         let loaded: SceneState = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.material_overrides().len(), 1);
         let entry = &loaded.material_overrides()[0];
+        assert_eq!(entry.object_id, Some(42));
+        assert_eq!(
+            entry.asset_path.as_deref(),
+            Some("assets/gltf/DamagedHelmet.gltf")
+        );
+        assert_eq!(entry.material_slot, Some(0));
         assert_eq!(entry.material_name, "Material_MR");
         assert_eq!(entry.data.base_color_rgba, [0.2, 0.3, 0.4, 1.0]);
         assert_eq!(entry.data.metallic, 0.8);

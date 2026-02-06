@@ -12,6 +12,14 @@ pub struct LoadedAsset {
     pub root_entity: Entity,
 }
 
+#[derive(Debug, Clone)]
+pub struct MaterialBinding {
+    pub material_name: String,
+    pub asset_path: String,
+    pub material_slot: usize,
+    pub object_id: u64,
+}
+
 pub struct AssetManager {
     // Store all loaded assets to keep them alive (prevent Drop from destroying entities)
     gltf_assets: Vec<GltfAsset>,
@@ -20,6 +28,7 @@ pub struct AssetManager {
     material_instances: Vec<MaterialInstance>,
     retired_material_instances: Vec<MaterialInstance>,
     material_names: Vec<String>,
+    material_bindings: Vec<MaterialBinding>,
     // glTF providers must outlive loaded assets/material instances.
     material_provider: Option<GltfMaterialProvider>,
     texture_provider: Option<GltfTextureProvider>,
@@ -56,6 +65,7 @@ impl AssetManager {
             material_instances: Vec::new(),
             retired_material_instances: Vec::new(),
             material_names: Vec::new(),
+            material_bindings: Vec::new(),
             material_provider: None,
             texture_provider: None,
         }
@@ -77,6 +87,10 @@ impl AssetManager {
         &self.material_names
     }
 
+    pub fn material_binding(&self, index: usize) -> Option<&MaterialBinding> {
+        self.material_bindings.get(index)
+    }
+
     /// Prepare for scene rebuild without dropping native glTF/material resources mid-frame.
     /// Old resources are retained until full teardown.
     pub fn prepare_for_scene_rebuild(&mut self) {
@@ -85,6 +99,7 @@ impl AssetManager {
         self.retired_gltf_assets.append(&mut self.gltf_assets);
         self.loaded_assets.clear();
         self.material_names.clear();
+        self.material_bindings.clear();
     }
 
     pub fn load_gltf_from_path(
@@ -93,6 +108,7 @@ impl AssetManager {
         scene: &mut Scene,
         entity_manager: &mut EntityManager,
         path: &str,
+        object_id: u64,
     ) -> Result<LoadedAsset, AssetError> {
         let gltf_bytes = load_gltf_bytes(path)?;
         if self.material_provider.is_none() {
@@ -147,8 +163,19 @@ impl AssetManager {
 
         // Keep asset alive by storing it (prevents Drop from destroying entities)
         let (instances, names) = asset.material_instances();
+        let bindings: Vec<MaterialBinding> = names
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| MaterialBinding {
+                material_name: name.clone(),
+                asset_path: path.to_string(),
+                material_slot: slot,
+                object_id,
+            })
+            .collect();
         self.material_instances.extend(instances);
         self.material_names.extend(names);
+        self.material_bindings.extend(bindings);
         self.gltf_assets.push(asset);
         self.loaded_assets.push(loaded_asset.clone());
         Ok(loaded_asset)
@@ -161,6 +188,7 @@ impl Drop for AssetManager {
         self.material_instances.clear();
         self.retired_material_instances.clear();
         self.material_names.clear();
+        self.material_bindings.clear();
         self.gltf_assets.clear();
         self.retired_gltf_assets.clear();
         self.loaded_assets.clear();

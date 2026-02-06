@@ -40,6 +40,13 @@ pub struct MaterialOverrideData {
 /// Maps a material identity to user-authored override values.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MaterialOverrideEntry {
+    #[serde(default)]
+    pub object_id: Option<u64>,
+    #[serde(default)]
+    pub asset_path: Option<String>,
+    #[serde(default)]
+    pub material_slot: Option<usize>,
+    #[serde(default)]
     pub material_name: String,
     pub data: MaterialOverrideData,
 }
@@ -47,6 +54,8 @@ pub struct MaterialOverrideEntry {
 /// Serializable scene object.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SceneObject {
+    #[serde(default)]
+    pub id: u64,
     pub name: String,
     pub kind: SceneObjectKind,
 }
@@ -64,6 +73,12 @@ pub struct SceneState {
     objects: Vec<SceneObject>,
     #[serde(default)]
     material_overrides: Vec<MaterialOverrideEntry>,
+    #[serde(default = "default_next_object_id")]
+    next_object_id: u64,
+}
+
+fn default_next_object_id() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -105,6 +120,7 @@ impl SceneState {
         Self {
             objects: Vec::new(),
             material_overrides: Vec::new(),
+            next_object_id: default_next_object_id(),
         }
     }
 
@@ -123,25 +139,62 @@ impl SceneState {
         self.objects.get_mut(index)
     }
 
+    pub fn reserve_object_id(&mut self) -> u64 {
+        let id = self.next_object_id.max(1);
+        self.next_object_id = id.saturating_add(1);
+        id
+    }
+
+    pub fn ensure_object_ids(&mut self) {
+        let mut next_id = self.next_object_id.max(1);
+        let mut max_id = 0u64;
+        for object in &mut self.objects {
+            if object.id == 0 {
+                object.id = next_id;
+                next_id = next_id.saturating_add(1);
+            }
+            max_id = max_id.max(object.id);
+        }
+        self.next_object_id = next_id.max(max_id.saturating_add(1));
+    }
+
     pub fn material_overrides(&self) -> &[MaterialOverrideEntry] {
         &self.material_overrides
     }
 
-    pub fn set_material_override(&mut self, material_name: String, data: MaterialOverrideData) {
+    pub fn set_material_override(
+        &mut self,
+        object_id: u64,
+        asset_path: String,
+        material_slot: usize,
+        material_name: String,
+        data: MaterialOverrideData,
+    ) {
         if let Some(existing) = self
             .material_overrides
             .iter_mut()
-            .find(|entry| entry.material_name == material_name)
+            .find(|entry| {
+                entry.object_id == Some(object_id) && entry.material_slot == Some(material_slot)
+            })
         {
+            existing.object_id = Some(object_id);
+            existing.asset_path = Some(asset_path);
+            existing.material_name = material_name;
             existing.data = data;
             return;
         }
-        self.material_overrides
-            .push(MaterialOverrideEntry { material_name, data });
+        self.material_overrides.push(MaterialOverrideEntry {
+            object_id: Some(object_id),
+            asset_path: Some(asset_path),
+            material_slot: Some(material_slot),
+            material_name,
+            data,
+        });
     }
 
-    pub fn add_asset(&mut self, name: String, path: &str) {
+    pub fn add_asset_with_id(&mut self, id: u64, name: String, path: &str) {
         self.objects.push(SceneObject {
+            id,
             name,
             kind: SceneObjectKind::Asset(AssetData {
                 path: path.to_string(),
@@ -153,7 +206,9 @@ impl SceneState {
     }
 
     pub fn add_directional_light(&mut self, name: &str, data: DirectionalLightData) {
+        let id = self.reserve_object_id();
         self.objects.push(SceneObject {
+            id,
             name: name.to_string(),
             kind: SceneObjectKind::DirectionalLight(data),
         });
@@ -173,7 +228,9 @@ impl SceneState {
             }
             None => {
                 // Add new environment
+                let id = self.reserve_object_id();
                 self.objects.push(SceneObject {
+                    id,
                     name: "Environment".to_string(),
                     kind: SceneObjectKind::Environment(data),
                 });

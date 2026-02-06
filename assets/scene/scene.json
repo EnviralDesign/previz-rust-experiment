@@ -1,6 +1,7 @@
 {
   "objects": [
     {
+      "id": 1,
       "name": "DamagedHelmet.gltf",
       "kind": {
         "Asset": {
@@ -24,6 +25,7 @@
       }
     },
     {
+      "id": 2,
       "name": "Directional Light",
       "kind": {
         "DirectionalLight": {
@@ -42,6 +44,7 @@
       }
     },
     {
+      "id": 3,
       "name": "Environment",
       "kind": {
         "Environment": {
@@ -51,10 +54,37 @@
           "intensity": 85111.1
         }
       }
+    },
+    {
+      "id": 4,
+      "name": "DamagedHelmet.gltf",
+      "kind": {
+        "Asset": {
+          "path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
+          "position": [
+            0.0,
+            0.5,
+            0.0
+          ],
+          "rotation_deg": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      }
     }
   ],
   "material_overrides": [
     {
+      "object_id": null,
+      "asset_path": null,
+      "material_slot": null,
       "material_name": "Material_MR",
       "data": {
         "base_color_rgba": [
@@ -71,6 +101,49 @@
           1.0
         ]
       }
+    },
+    {
+      "object_id": null,
+      "asset_path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
+      "material_slot": 0,
+      "material_name": "Material_MR",
+      "data": {
+        "base_color_rgba": [
+          1.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "metallic": 1.0,
+        "roughness": 1.0,
+        "emissive_rgb": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "object_id": 1,
+      "asset_path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
+      "material_slot": 0,
+      "material_name": "Material_MR",
+      "data": {
+        "base_color_rgba": [
+          0.11764705,
+          1.0,
+          0.0,
+          1.0
+        ],
+        "metallic": 1.0,
+        "roughness": 1.0,
+        "emissive_rgb": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
     }
-  ]
+  ],
+  "next_object_id": 5
 }
