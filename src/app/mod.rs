@@ -183,6 +183,7 @@ pub struct App {
     camera_control_profile: CameraControlProfile,
     transform_tool_mode: TransformToolMode,
     gizmo_active_axis: i32,
+    gizmo_hover_axis: i32,
     gizmo_drag_state: Option<GizmoDragState>,
     delete_selection_requested: bool,
     orbit_pivot: [f32; 3],
@@ -224,6 +225,7 @@ impl App {
             camera_control_profile: CameraControlProfile::Blender,
             transform_tool_mode: TransformToolMode::Translate,
             gizmo_active_axis: 0,
+            gizmo_hover_axis: 0,
             gizmo_drag_state: None,
             delete_selection_requested: false,
             orbit_pivot: [0.0, 0.0, 0.0],
@@ -1023,6 +1025,11 @@ impl App {
                     (-f32::MAX, -f32::MAX)
                 };
                 let (camera_forward, _camera_right, camera_up) = self.camera.basis();
+                let highlighted_handle = if self.gizmo_active_axis != GIZMO_NONE {
+                    self.gizmo_active_axis
+                } else {
+                    self.gizmo_hover_axis
+                };
                 render.update_gizmo_overlay(crate::render::GizmoParams {
                     visible: gizmo_visible && can_edit_transform,
                     mode: self.transform_tool_mode as i32,
@@ -1030,6 +1037,7 @@ impl App {
                     axis_world_len: gizmo_axis_world_len,
                     camera_forward,
                     camera_up,
+                    highlighted_handle,
                     selected_object_index: Self::normalize_selection(
                         selected_index,
                         self.scene.objects().len(),
@@ -1149,23 +1157,45 @@ impl App {
                 if self.transform_tool_mode == TransformToolMode::Select {
                     selected_index = -1;
                 } else {
-                    self.gizmo_active_axis = GIZMO_NONE;
-                    gizmo_active_axis = GIZMO_NONE;
+                    if self.mouse_buttons[0] {
+                        self.gizmo_active_axis = GIZMO_NONE;
+                        gizmo_active_axis = GIZMO_NONE;
+                    } else {
+                        self.gizmo_hover_axis = GIZMO_NONE;
+                    }
                 }
             } else if hit.key.kind == crate::render::PickKind::SceneMesh {
                 let index = hit.key.object_id as usize;
                 selected_index = i32::try_from(index).unwrap_or(-1);
                 self.gizmo_active_axis = GIZMO_NONE;
                 gizmo_active_axis = GIZMO_NONE;
+                self.gizmo_hover_axis = GIZMO_NONE;
             } else if matches!(
                 hit.key.kind,
                 crate::render::PickKind::GizmoAxis
                     | crate::render::PickKind::GizmoPlane
                     | crate::render::PickKind::GizmoRing
             ) {
-                self.gizmo_active_axis = hit.key.sub_id as i32;
-                gizmo_active_axis = self.gizmo_active_axis;
+                if self.mouse_buttons[0] {
+                    self.gizmo_active_axis = hit.key.sub_id as i32;
+                    gizmo_active_axis = self.gizmo_active_axis;
+                } else {
+                    self.gizmo_hover_axis = hit.key.sub_id as i32;
+                }
             }
+        }
+        // Hover highlight: while idle in transform modes, pick continuously under cursor.
+        if self.transform_tool_mode != TransformToolMode::Select
+            && !self.mouse_buttons[0]
+            && self.gizmo_drag_state.is_none()
+            && has_active_selection
+            && !self.mouse_over_sidebar_ui()
+        {
+            if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
+                render.request_pick(mx, my);
+            }
+        } else if self.transform_tool_mode == TransformToolMode::Select || !has_active_selection {
+            self.gizmo_hover_axis = GIZMO_NONE;
         }
         // In transform modes, keep requesting pick while LMB is held until a handle is acquired.
         // This smooths over one-frame misses when a new gizmo/handle becomes active.
@@ -3123,6 +3153,7 @@ impl ApplicationHandler for App {
                 self.mouse_pos = None;
                 self.camera_drag_mode = None;
                 self.gizmo_drag_state = None;
+                self.gizmo_hover_axis = GIZMO_NONE;
                 self.pending_click_select = false;
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(-f32::MAX, -f32::MAX);

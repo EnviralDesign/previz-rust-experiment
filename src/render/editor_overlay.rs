@@ -36,6 +36,7 @@ pub struct GizmoParams {
     pub axis_world_len: f32,
     pub camera_forward: [f32; 3],
     pub camera_up: [f32; 3],
+    pub highlighted_handle: i32,
     pub selected_object_index: Option<u32>,
 }
 
@@ -93,6 +94,7 @@ impl EditorOverlay {
                 axis_world_len: 1.0,
                 camera_forward: [0.0, 0.0, -1.0],
                 camera_up: [0.0, 1.0, 0.0],
+                highlighted_handle: 0,
                 selected_object_index: None,
             },
         })
@@ -148,7 +150,18 @@ impl EditorOverlay {
                 self.layer_hidden_value
             };
             engine.renderable_set_layer_mask(handle.entity, 0xFF, value);
-            let rgba = [1.0, 1.0, 1.0, (handle.base_alpha * fade).clamp(0.0, 1.0)];
+            let is_highlighted = self.params.highlighted_handle == handle.handle_id;
+            let (rgb, alpha_mult) = if is_highlighted {
+                ([1.30, 1.26, 1.08], 1.05)
+            } else {
+                ([1.0, 1.0, 1.0], 1.0)
+            };
+            let mut alpha = (handle.base_alpha * fade * alpha_mult).clamp(0.0, 1.0);
+            // Inner arcball disk should always stay subtle.
+            if handle.handle_id == GIZMO_ROTATE_ARCBALL {
+                alpha = alpha.min(0.20);
+            }
+            let rgba = [rgb[0], rgb[1], rgb[2], alpha];
             handle.material_instance.set_float4("tint", rgba);
         }
     }
@@ -242,19 +255,27 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let axis_mesh_x = create_box_mesh(engine, [0.5, 0.0, 0.0], [1.0, 0.02, 0.02], [255, 80, 80, 255]);
-        let axis_mesh_y = create_box_mesh(engine, [0.0, 0.5, 0.0], [0.02, 1.0, 0.02], [80, 255, 80, 255]);
-        let axis_mesh_z = create_box_mesh(engine, [0.0, 0.0, 0.5], [0.02, 0.02, 1.0], [80, 160, 255, 255]);
+        let x_col = [220, 118, 118, 255];
+        let y_col = [132, 210, 132, 255];
+        let z_col = [126, 168, 220, 255];
         let data = [
-            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, 1.0, axis_mesh_x),
-            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, 1.0, axis_mesh_y),
-            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, 1.0, axis_mesh_z),
-            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, 1.0, create_box_mesh(engine, [0.5, 0.0, 0.0], [1.0, 0.02, 0.02], [255, 80, 80, 255])),
-            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, 1.0, create_box_mesh(engine, [0.0, 0.5, 0.0], [0.02, 1.0, 0.02], [80, 255, 80, 255])),
-            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, 1.0, create_box_mesh(engine, [0.0, 0.0, 0.5], [0.02, 0.02, 1.0], [80, 160, 255, 255])),
+            // Translate shafts + arrow heads.
+            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.41, 0.0, 0.0], [0.82, 0.017, 0.017], x_col)),
+            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.0, 0.41, 0.0], [0.017, 0.82, 0.017], y_col)),
+            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.41], [0.017, 0.017, 0.82], z_col)),
+            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [1.0, 0.0, 0.0], 1, 0.14, 0.045, x_col)),
+            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 1.0, 0.0], 2, 0.14, 0.045, y_col)),
+            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 0.0, 1.0], 3, 0.14, 0.045, z_col)),
+            // Scale shafts + square heads.
+            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.43, 0.0, 0.0], [0.86, 0.017, 0.017], x_col)),
+            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.43, 0.0], [0.017, 0.86, 0.017], y_col)),
+            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.43], [0.017, 0.017, 0.86], z_col)),
+            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [1.0, 0.0, 0.0], [0.08, 0.08, 0.08], x_col)),
+            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 1.0, 0.0], [0.08, 0.08, 0.08], y_col)),
+            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 1.0], [0.08, 0.08, 0.08], z_col)),
         ];
-        for (id, kind, mask, rot, bb, pickable, base_alpha, mesh) in data {
-            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable, base_alpha) {
+        for (id, kind, mask, bb, pickable, base_alpha, mesh) in data {
+            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, Mat3::IDENTITY, bb, pickable, base_alpha) {
                 out.push(h);
             }
         }
@@ -296,17 +317,17 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let ring_x = create_ring_mesh(engine, 1.10, 0.008, [255, 80, 80, 220], 64, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2));
-        let ring_y = create_ring_mesh(engine, 1.10, 0.008, [80, 255, 80, 220], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
-        let ring_z = create_ring_mesh(engine, 1.10, 0.008, [80, 160, 255, 220], 64, Mat3::IDENTITY);
+        let ring_x = create_ring_mesh(engine, 1.10, 0.008, [220, 118, 118, 210], 64, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let ring_y = create_ring_mesh(engine, 1.10, 0.008, [132, 210, 132, 210], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
+        let ring_z = create_ring_mesh(engine, 1.10, 0.008, [126, 168, 220, 210], 64, Mat3::IDENTITY);
         let view_ring = create_ring_mesh(engine, 1.22, 0.007, [230, 230, 230, 200], 64, Mat3::IDENTITY);
-        let arcball_disk = create_disk_mesh(engine, 1.03, [255, 255, 255, 28], 48);
+        let arcball_disk = create_disk_mesh(engine, 1.03, [210, 210, 210, 18], 48);
         let specs = [
             (GIZMO_ROTATE_X, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_x),
             (GIZMO_ROTATE_Y, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_y),
             (GIZMO_ROTATE_Z, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_z),
             (GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, 1.0, view_ring),
-            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, 0.6, arcball_disk),
+            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, 0.15, arcball_disk),
         ];
         for (id, kind, mask, billboard, pickable, base_alpha, mesh) in specs {
             if let Some(h) = Self::add_handle(
@@ -472,6 +493,52 @@ fn create_box_mesh(engine: &mut Engine, center: [f32; 3], size: [f32; 3], color:
         3, 7, 4, 3, 4, 0,
     ];
     create_mesh(engine, &p, &c, &idx).expect("box mesh")
+}
+
+fn create_pyramid_mesh(
+    engine: &mut Engine,
+    tip: [f32; 3],
+    axis_id: i32,
+    length: f32,
+    base_half: f32,
+    color: [u8; 4],
+) -> MeshResource {
+    let axis = match axis_id {
+        1 => Vec3::X,
+        2 => Vec3::Y,
+        3 => Vec3::Z,
+        _ => Vec3::X,
+    };
+    let (u, v) = match axis_id {
+        1 => (Vec3::Y, Vec3::Z),
+        2 => (Vec3::X, Vec3::Z),
+        3 => (Vec3::X, Vec3::Y),
+        _ => (Vec3::Y, Vec3::Z),
+    };
+    let tip_v = Vec3::from_array(tip);
+    let base_center = tip_v - axis * length.max(0.001);
+    let p0 = tip_v;
+    let p1 = base_center + u * base_half + v * base_half;
+    let p2 = base_center + u * base_half - v * base_half;
+    let p3 = base_center - u * base_half - v * base_half;
+    let p4 = base_center - u * base_half + v * base_half;
+    let positions = [
+        p0.to_array(),
+        p1.to_array(),
+        p2.to_array(),
+        p3.to_array(),
+        p4.to_array(),
+    ];
+    let colors = [color; 5];
+    let indices: [u16; 18] = [
+        0, 1, 2,
+        0, 2, 3,
+        0, 3, 4,
+        0, 4, 1,
+        1, 4, 3,
+        1, 3, 2,
+    ];
+    create_mesh(engine, &positions, &colors, &indices).expect("pyramid mesh")
 }
 
 fn create_quad_mesh(engine: &mut Engine, center: [f32; 3], size: [f32; 2], color: [u8; 4]) -> MeshResource {
