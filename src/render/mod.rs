@@ -375,8 +375,9 @@ impl RenderContext {
         // Pick readback — after endFrame, before next beginFrame
         if let Some(ps) = &mut self.pick_system {
             if ps.has_pending_pick() {
-                if ps.readback(&mut self.renderer) {
+                if ps.schedule_readback(&mut self.renderer) {
                     self.engine.flush_and_wait();
+                    ps.complete_readback();
                 }
             }
         }
@@ -493,6 +494,9 @@ impl RenderContext {
             return;
         }
         self.view.set_scene(&mut self.scene);
+        if let Some(pick_view) = &mut self.pick_view {
+            pick_view.set_scene(&mut self.scene);
+        }
 
         // Reset environment
         self.scene.set_indirect_light(None);

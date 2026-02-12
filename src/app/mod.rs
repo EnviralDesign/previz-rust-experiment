@@ -1092,11 +1092,6 @@ impl App {
                             }
                         })
                         .collect();
-                    if !pickable_entities.is_empty() {
-                        log::info!("pickable_entities: {} groups, entities: {:?}",
-                            pickable_entities.len(),
-                            pickable_entities.iter().map(|(id, ents)| (*id, ents.len())).collect::<Vec<_>>());
-                    }
                     render.execute_pick_pass(&pickable_entities);
                 }
 
@@ -1168,12 +1163,11 @@ impl App {
         if let Some(hit) = pick_hit {
             if hit.is_none() {
                 if self.transform_tool_mode == TransformToolMode::Select {
-                    self.set_selection_from_index(None);
+                    selected_index = -1;
                 }
             } else if hit.key.kind == crate::render::PickKind::SceneMesh {
                 let index = hit.key.object_id as usize;
-                self.set_selection_from_index(Some(index));
-                log::info!("GPU pick: SceneMesh index={}", index);
+                selected_index = i32::try_from(index).unwrap_or(-1);
             }
         }
         let previous_selection_id = self.selection_id;

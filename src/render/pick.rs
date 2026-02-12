@@ -186,6 +186,8 @@ pub struct PickSystem {
 
     // Latest pick result
     last_hit: Option<PickHit>,
+    // Metadata for an in-flight GPU readback that must be decoded after flush.
+    pending_readback: Option<(f32, f32, u32, u32)>,
 }
 
 impl PickSystem {
@@ -224,6 +226,7 @@ impl PickSystem {
             readback_buffer: vec![0u8; 4], // 1×1 RGBA
             pending_pick: None,
             last_hit: None,
+            pending_readback: None,
         })
     }
 
@@ -276,7 +279,6 @@ impl PickSystem {
     /// Request a pick at the given screen coordinates.
     /// The result will be available after the next render.
     pub fn request_pick(&mut self, screen_x: f32, screen_y: f32) {
-        log::info!("PickSystem::request_pick({}, {})", screen_x, screen_y);
         self.pending_pick = Some((screen_x, screen_y));
     }
 
@@ -340,9 +342,6 @@ impl PickSystem {
                 saved.push((entity, SavedMaterials { entries }));
             }
         }
-        log::info!("render_pick_pass: {} object groups, {} total entities swapped",
-            pickable_entities.len(), saved.len());
-
         // 2. Render pick view
         renderer.render(pick_view);
 
@@ -354,9 +353,9 @@ impl PickSystem {
         }
     }
 
-    /// After end_frame(), read back the pixel at the pending pick location.
-    /// Caller must call engine.flush_and_wait() after this returns true.
-    pub fn readback(
+    /// Schedule a pixel readback at the pending pick location.
+    /// Caller must call `engine.flush_and_wait()` and then `complete_readback()`.
+    pub fn schedule_readback(
         &mut self,
         renderer: &mut Renderer,
     ) -> bool {
@@ -379,28 +378,33 @@ impl PickSystem {
         );
 
         if ok {
-            let rgba = [
-                self.readback_buffer[0],
-                self.readback_buffer[1],
-                self.readback_buffer[2],
-                self.readback_buffer[3],
-            ];
-            log::info!("readback pixel at ({},{}) = RGBA({},{},{},{})",
-                px, py_flipped, rgba[0], rgba[1], rgba[2], rgba[3]);
-            let key = PickKey::from_rgba(rgba);
-            log::info!("decoded PickKey: kind={:?}, object_id={}, sub_id={}",
-                key.kind, key.object_id, key.sub_id);
-            self.last_hit = Some(PickHit {
-                key,
-                screen_x: sx,
-                screen_y: sy,
-            });
+            // Buffer is filled asynchronously by Filament; decode only after flush.
+            self.pending_readback = Some((sx, sy, px, py_flipped));
         } else {
             log::info!("readback FAILED at ({},{})", px, py_flipped);
             self.last_hit = Some(PickHit::none());
         }
 
         ok
+    }
+
+    /// Decode the last scheduled readback after `engine.flush_and_wait()`.
+    pub fn complete_readback(&mut self) {
+        let Some((sx, sy, _px, _py)) = self.pending_readback.take() else {
+            return;
+        };
+        let rgba = [
+            self.readback_buffer[0],
+            self.readback_buffer[1],
+            self.readback_buffer[2],
+            self.readback_buffer[3],
+        ];
+        let key = PickKey::from_rgba(rgba);
+        self.last_hit = Some(PickHit {
+            key,
+            screen_x: sx,
+            screen_y: sy,
+        });
     }
 }
 
