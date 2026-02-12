@@ -655,6 +655,12 @@ impl View {
             ffi::filament_view_set_post_processing_enabled(self.ptr.as_ptr() as *mut _, enabled);
         }
     }
+
+    pub fn set_visible_layers(&mut self, select: u8, values: u8) {
+        unsafe {
+            ffi::filament_view_set_visible_layers(self.ptr.as_ptr() as *mut _, select, values);
+        }
+    }
 }
 
 impl Drop for View {
@@ -1739,6 +1745,13 @@ impl RenderableBuilder {
         self
     }
 
+    pub fn layer_mask(self, select: u8, values: u8) -> Self {
+        unsafe {
+            ffi::filament_renderable_builder_layer_mask(self.ptr, select, values);
+        }
+        self
+    }
+
     pub fn build(self, entity: Entity) {
         unsafe {
             ffi::filament_renderable_builder_build(
@@ -1895,6 +1908,17 @@ impl Engine {
                 entity.id,
                 primitive_index,
                 raw_ptr as *mut _,
+            );
+        }
+    }
+
+    pub fn renderable_set_layer_mask(&mut self, entity: Entity, select: u8, values: u8) {
+        unsafe {
+            ffi::filament_renderable_set_layer_mask(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+                select,
+                values,
             );
         }
     }

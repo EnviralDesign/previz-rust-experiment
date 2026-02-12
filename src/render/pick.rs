@@ -170,8 +170,7 @@ pub struct PickSystem {
     // Pick material (compiled from pickId.mat)
     pick_material: Material,
 
-    // Per-object_id material instances keyed by pick object_id.
-    // Each has its `pickColor` set to encode that id.
+    // Per-pick-key material instances keyed by RGBA packing.
     pick_instances: HashMap<u32, MaterialInstance>,
 
     // Viewport size (for coordinate transform and resize)
@@ -293,16 +292,17 @@ impl PickSystem {
     }
 
     /// Get or create a MaterialInstance for a given pick object_id.
-    fn ensure_pick_instance(&mut self, object_id: u32) -> &MaterialInstance {
-        if !self.pick_instances.contains_key(&object_id) {
-            let key = PickKey::scene_mesh(object_id);
+    fn ensure_pick_instance(&mut self, key: PickKey) -> &MaterialInstance {
+        let rgba = key.to_rgba();
+        let packed = u32::from_be_bytes(rgba);
+        if !self.pick_instances.contains_key(&packed) {
             let color = key.to_float4();
             let mut mi = self.pick_material.create_instance()
                 .expect("Failed to create pick material instance");
             mi.set_float4("pickColor", color);
-            self.pick_instances.insert(object_id, mi);
+            self.pick_instances.insert(packed, mi);
         }
-        &self.pick_instances[&object_id]
+        &self.pick_instances[&packed]
     }
 
     /// Execute the pick pass within a frame.
@@ -314,22 +314,23 @@ impl PickSystem {
     /// 2. Render pick view to offscreen target
     /// 3. Restore all original materials
     ///
-    /// `pickable_entities` maps object_id → list of filament entity IDs for that object.
+    /// `pickable_entities` maps pick key -> list of filament entity IDs.
     pub fn render_pick_pass(
         &mut self,
         engine: &mut Engine,
         renderer: &mut Renderer,
         pick_view: &View,
-        pickable_entities: &[(u32, Vec<Entity>)],
+        pickable_entities: &[(PickKey, Vec<Entity>)],
     ) {
         // 1. Save and swap materials
         let mut saved: Vec<(Entity, SavedMaterials)> = Vec::new();
 
-        for (object_id, entities) in pickable_entities {
+        for (key, entities) in pickable_entities {
             // Pre-bake the pick instance. We need the pick instance pointer
             // so that we can set it on each primitive.
-            self.ensure_pick_instance(*object_id);
-            let pick_mi = &self.pick_instances[object_id];
+            self.ensure_pick_instance(*key);
+            let packed = u32::from_be_bytes(key.to_rgba());
+            let pick_mi = &self.pick_instances[&packed];
 
             for &entity in entities {
                 let prim_count = engine.renderable_primitive_count(entity);

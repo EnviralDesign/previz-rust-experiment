@@ -103,6 +103,7 @@ extern "C" {
         height: u32,
     );
     pub fn filament_view_set_post_processing_enabled(view: *mut View, enabled: bool);
+    pub fn filament_view_set_visible_layers(view: *mut View, select: u8, values: u8);
     
     // ========================================================================
     // Scene
@@ -337,6 +338,11 @@ extern "C" {
         primitive_type: u8,
         vertex_buffer: *mut VertexBuffer,
         index_buffer: *mut IndexBuffer,
+    );
+    pub fn filament_renderable_builder_layer_mask(
+        wrapper: *mut RenderableBuilderWrapper,
+        select: u8,
+        values: u8,
     );
     pub fn filament_renderable_builder_culling(
         wrapper: *mut RenderableBuilderWrapper,
@@ -630,6 +636,12 @@ extern "C" {
         entity_id: i32,
         primitive_index: i32,
         mi: *mut MaterialInstance,
+    );
+    pub fn filament_renderable_set_layer_mask(
+        engine: *mut Engine,
+        entity_id: i32,
+        select: u8,
+        values: u8,
     );
 
     // ========================================================================

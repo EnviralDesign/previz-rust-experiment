@@ -816,54 +816,6 @@ impl App {
         Some([screen_x, screen_y])
     }
 
-    fn pick_scene_object(&self, screen_x: f32, screen_y: f32) -> Option<usize> {
-        let (ray_origin, ray_dir) = self.viewport_ray(screen_x, screen_y)?;
-        let mut best_hit: Option<(usize, f32)> = None;
-        for (index, object) in self.scene.objects().iter().enumerate() {
-            let t_hit = match &object.kind {
-                SceneObjectKind::Asset(data) => {
-                    let runtime = self.scene_runtime.get(index).copied().unwrap_or_default();
-                    let center = [
-                        data.position[0] + runtime.center[0] * data.scale[0],
-                        data.position[1] + runtime.center[1] * data.scale[1],
-                        data.position[2] + runtime.center[2] * data.scale[2],
-                    ];
-                    let extent = [
-                        runtime.extent[0] * data.scale[0].abs().max(0.001),
-                        runtime.extent[1] * data.scale[1].abs().max(0.001),
-                        runtime.extent[2] * data.scale[2].abs().max(0.001),
-                    ];
-                    let t_aabb = ray_intersect_aabb(ray_origin, ray_dir, center, extent);
-                    let radius = extent[0].max(extent[1]).max(extent[2]).max(0.1);
-                    let t_sphere = ray_intersect_sphere(ray_origin, ray_dir, center, radius);
-                    match (t_aabb, t_sphere) {
-                        (Some(a), Some(b)) => Some(a.min(b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
-                    }
-                }
-                SceneObjectKind::DirectionalLight(_) => {
-                    ray_intersect_sphere(ray_origin, ray_dir, [0.0, 0.0, 0.0], 0.6)
-                }
-                SceneObjectKind::Environment(_) => {
-                    ray_intersect_sphere(ray_origin, ray_dir, self.orbit_pivot, 0.9)
-                }
-            };
-            let Some(t) = t_hit else {
-                continue;
-            };
-            if t < 0.0 {
-                continue;
-            }
-            match best_hit {
-                Some((_, best_t)) if t >= best_t => {}
-                _ => best_hit = Some((index, t)),
-            }
-        }
-        best_hit.map(|(index, _)| index)
-    }
-
     fn selection_to_ui_index(selection: Option<usize>) -> i32 {
         selection
             .and_then(|value| i32::try_from(value).ok())
@@ -951,6 +903,7 @@ impl App {
         let mut gizmo_visible = false;
         let mut gizmo_origin_world_xyz = [f32::NAN; 3];
         let camera_world_xyz = self.camera.position;
+        let mut gizmo_axis_world_len = 1.0f32;
         if let Some(selected) = Self::normalize_selection(selected_index, self.scene.objects().len()) {
             if let Some(object) = self.scene.objects().get(selected) {
                 let world = match &object.kind {
@@ -967,6 +920,7 @@ impl App {
                     let dz = world[2] - self.camera.position[2];
                     let distance = (dx * dx + dy * dy + dz * dz).sqrt().max(0.1);
                     let axis_world_len = (distance * 0.18).max(0.15);
+                    gizmo_axis_world_len = axis_world_len;
                     let x_world = [world[0] + axis_world_len, world[1], world[2]];
                     let y_world = [world[0], world[1] + axis_world_len, world[2]];
                     let z_world = [world[0], world[1], world[2] + axis_world_len];
@@ -1067,6 +1021,20 @@ impl App {
                 } else {
                     (-f32::MAX, -f32::MAX)
                 };
+                let (camera_forward, _camera_right, camera_up) = self.camera.basis();
+                render.update_gizmo_overlay(crate::render::GizmoParams {
+                    visible: gizmo_visible && can_edit_transform,
+                    mode: self.transform_tool_mode as i32,
+                    origin: gizmo_origin_world_xyz,
+                    axis_world_len: gizmo_axis_world_len,
+                    camera_forward,
+                    camera_up,
+                    selected_object_index: Self::normalize_selection(
+                        selected_index,
+                        self.scene.objects().len(),
+                    )
+                    .and_then(|idx| u32::try_from(idx).ok()),
+                });
                 render.ui_mouse_pos(mx, my);
                 for (index, down) in self.mouse_buttons.iter().enumerate() {
                     render.ui_mouse_button(index as i32, *down);
@@ -1074,7 +1042,7 @@ impl App {
 
                 // GPU pick pass — execute before the beauty pass
                 if render.has_pick_system() {
-                    let pickable_entities: Vec<(u32, Vec<crate::filament::Entity>)> = self
+                    let pickable_entities: Vec<(crate::render::PickKey, Vec<crate::filament::Entity>)> = self
                         .scene
                         .objects()
                         .iter()
@@ -1086,7 +1054,12 @@ impl App {
                                         .and_then(|rt| rt.root_entity)
                                         .map_or(false, |re| re == a.root_entity)
                                 });
-                                loaded.map(|a| (index as u32, a.renderable_entities.clone()))
+                                loaded.map(|a| {
+                                    (
+                                        crate::render::PickKey::scene_mesh(index as u32),
+                                        a.renderable_entities.clone(),
+                                    )
+                                })
                             } else {
                                 None
                             }
@@ -1162,12 +1135,36 @@ impl App {
         // Process GPU pick result (outside borrow scope)
         if let Some(hit) = pick_hit {
             if hit.is_none() {
+                log::info!("GPU pick: none");
                 if self.transform_tool_mode == TransformToolMode::Select {
                     selected_index = -1;
+                } else {
+                    self.gizmo_active_axis = GIZMO_NONE;
+                    gizmo_active_axis = GIZMO_NONE;
                 }
             } else if hit.key.kind == crate::render::PickKind::SceneMesh {
+                log::info!("GPU pick: SceneMesh object_id={}", hit.key.object_id);
                 let index = hit.key.object_id as usize;
                 selected_index = i32::try_from(index).unwrap_or(-1);
+                self.gizmo_active_axis = GIZMO_NONE;
+                gizmo_active_axis = GIZMO_NONE;
+            } else if matches!(
+                hit.key.kind,
+                crate::render::PickKind::GizmoAxis
+                    | crate::render::PickKind::GizmoPlane
+                    | crate::render::PickKind::GizmoRing
+            ) {
+                log::info!(
+                    "GPU pick: {:?} sub_id={}",
+                    hit.key.kind, hit.key.sub_id
+                );
+                self.gizmo_active_axis = hit.key.sub_id as i32;
+                gizmo_active_axis = self.gizmo_active_axis;
+            }
+        }
+        if self.mouse_buttons[0] && self.gizmo_active_axis != GIZMO_NONE && self.gizmo_drag_state.is_none() {
+            if let Some(mouse) = self.mouse_pos {
+                self.begin_gizmo_drag_if_needed(mouse);
             }
         }
         let previous_selection_id = self.selection_id;
@@ -1559,6 +1556,9 @@ impl App {
             .assets
             .load_gltf_from_path(engine, scene, &mut entity_manager, path, object_id)
             ?;
+        for entity in &loaded.renderable_entities {
+            engine.renderable_set_layer_mask(*entity, 0xFF, 0x01);
+        }
 
         log::info!(
             "Loaded glTF '{}' center={:?} extent={:?}",
@@ -2000,6 +2000,9 @@ impl App {
                             )
                         {
                             Ok(loaded) => {
+                                for entity in &loaded.renderable_entities {
+                                    engine.renderable_set_layer_mask(*entity, 0xFF, 0x01);
+                                }
                                 transforms_to_apply.push((
                                     loaded.root_entity,
                                     compose_transform_matrix(
@@ -2653,36 +2656,6 @@ fn display_path_for_scene(path: &std::path::Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn ray_intersect_sphere(
-    origin: [f32; 3],
-    dir: [f32; 3],
-    center: [f32; 3],
-    radius: f32,
-) -> Option<f32> {
-    let oc = [
-        origin[0] - center[0],
-        origin[1] - center[1],
-        origin[2] - center[2],
-    ];
-    let a = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
-    let b = 2.0 * (oc[0] * dir[0] + oc[1] * dir[1] + oc[2] * dir[2]);
-    let c = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - radius * radius;
-    let discriminant = b * b - 4.0 * a * c;
-    if discriminant < 0.0 {
-        return None;
-    }
-    let sqrt_d = discriminant.sqrt();
-    let t0 = (-b - sqrt_d) / (2.0 * a);
-    let t1 = (-b + sqrt_d) / (2.0 * a);
-    if t0 >= 0.0 {
-        Some(t0)
-    } else if t1 >= 0.0 {
-        Some(t1)
-    } else {
-        None
-    }
-}
-
 fn closest_line_line_param(
     line_a_origin: [f32; 3],
     line_a_dir: [f32; 3],
@@ -2783,48 +2756,6 @@ fn map_arcball_vector(
     }
     v = v.normalize();
     v.to_array()
-}
-
-fn ray_intersect_aabb(
-    origin: [f32; 3],
-    dir: [f32; 3],
-    center: [f32; 3],
-    extent: [f32; 3],
-) -> Option<f32> {
-    let min = [
-        center[0] - extent[0],
-        center[1] - extent[1],
-        center[2] - extent[2],
-    ];
-    let max = [
-        center[0] + extent[0],
-        center[1] + extent[1],
-        center[2] + extent[2],
-    ];
-    let mut tmin = 0.0f32;
-    let mut tmax = f32::INFINITY;
-    for axis in 0..3 {
-        let d = dir[axis];
-        let o = origin[axis];
-        if d.abs() < 1e-6 {
-            if o < min[axis] || o > max[axis] {
-                return None;
-            }
-            continue;
-        }
-        let inv_d = 1.0 / d;
-        let mut t1 = (min[axis] - o) * inv_d;
-        let mut t2 = (max[axis] - o) * inv_d;
-        if t1 > t2 {
-            std::mem::swap(&mut t1, &mut t2);
-        }
-        tmin = tmin.max(t1);
-        tmax = tmax.min(t2);
-        if tmin > tmax {
-            return None;
-        }
-    }
-    Some(tmin)
 }
 
 fn apply_material_override(
@@ -3144,11 +3075,12 @@ impl ApplicationHandler for App {
                 let prev_pos = self.mouse_pos;
                 self.mouse_pos = Some(new_pos);
                 let mut ui_capture_mouse = false;
+                let over_sidebar_ui = self.mouse_over_sidebar_ui();
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(new_pos.0, new_pos.1);
                     ui_capture_mouse = render.ui_want_capture_mouse();
                 }
-                if !ui_capture_mouse {
+                if !over_sidebar_ui {
                     if self.mouse_buttons[0] && self.gizmo_active_axis != 0 {
                         self.begin_gizmo_drag_if_needed(new_pos);
                         self.apply_transform_tool_drag(new_pos);
@@ -3187,24 +3119,44 @@ impl ApplicationHandler for App {
                         self.mouse_buttons[button_index as usize] = pressed;
                     }
                     let mut ui_capture_mouse = false;
+                    let over_sidebar_ui = self.mouse_over_sidebar_ui();
                     if let Some(render) = &mut self.render {
                         render.ui_mouse_button(button_index, pressed);
                         ui_capture_mouse = render.ui_want_capture_mouse();
                     }
-                    if !ui_capture_mouse {
+                    if !over_sidebar_ui {
                         match self.camera_control_profile {
                             CameraControlProfile::Blender => match (button, pressed) {
                                 (MouseButton::Left, true) => {
-                                    self.pending_click_select = true;
+                                    if self.transform_tool_mode == TransformToolMode::Select {
+                                        self.pending_click_select = true;
+                                        log::info!("LMB down select: defer pick until release");
+                                    } else {
+                                        self.pending_click_select = false;
+                                        if let (Some((mx, my)), Some(render)) =
+                                            (self.mouse_pos, &mut self.render)
+                                        {
+                                            log::info!(
+                                                "LMB down transform: request pick at ({:.1}, {:.1})",
+                                                mx, my
+                                            );
+                                            render.request_pick(mx, my);
+                                        }
+                                    }
                                 }
                                 (MouseButton::Left, false) => {
                                     if self.pending_click_select && self.gizmo_active_axis == 0 {
                                         if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
+                                            log::info!(
+                                                "LMB up select: request pick at ({:.1}, {:.1})",
+                                                mx, my
+                                            );
                                             render.request_pick(mx, my);
                                         }
                                     }
                                     self.pending_click_select = false;
                                     self.gizmo_drag_state = None;
+                                    self.gizmo_active_axis = GIZMO_NONE;
                                 }
                                 (MouseButton::Middle, true) => {
                                     self.pending_click_select = false;

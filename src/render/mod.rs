@@ -1,8 +1,10 @@
 mod camera;
+mod editor_overlay;
 pub mod pick;
 
 pub use camera::{CameraController, CameraMovement};
-pub use pick::{PickHit, PickKind, PickSystem};
+pub use editor_overlay::GizmoParams;
+pub use pick::{PickHit, PickKey, PickKind, PickSystem};
 
 use crate::filament::{
     Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox,
@@ -47,6 +49,7 @@ pub struct RenderContext {
     swap_chain: SwapChain,
     renderer: Renderer,
     view: View,
+    overlay_view: Option<View>,
     ui_view: Option<View>,
     ui_helper: Option<ImGuiHelper>,
     scene: Scene,
@@ -61,8 +64,12 @@ pub struct RenderContext {
     // GPU pick pass
     pick_system: Option<PickSystem>,
     pick_view: Option<View>,
-    pending_pick_entities: Option<Vec<(u32, Vec<Entity>)>>,
+    pending_pick_entities: Option<Vec<(PickKey, Vec<Entity>)>>,
+    editor_overlay: Option<editor_overlay::EditorOverlay>,
 }
+
+const LAYER_SCENE: u8 = 0x01;
+const LAYER_OVERLAY: u8 = 0x02;
 
 impl RenderContext {
     pub fn new(window: &Window) -> Result<Self, RenderError> {
@@ -92,6 +99,16 @@ impl RenderContext {
         view.set_viewport(0, 0, window_size.width, window_size.height);
         view.set_scene(&mut scene);
         view.set_camera(&mut camera);
+        view.set_visible_layers(0xFF, LAYER_SCENE);
+
+        let mut overlay_view = engine.create_view();
+        if let Some(ov) = &mut overlay_view {
+            ov.set_scene(&mut scene);
+            ov.set_camera(&mut camera);
+            ov.set_viewport(0, 0, window_size.width, window_size.height);
+            ov.set_post_processing_enabled(false);
+            ov.set_visible_layers(0xFF, LAYER_OVERLAY);
+        }
 
         // Initialize GPU pick system
         let pick_system = PickSystem::new(&mut engine, window_size.width, window_size.height);
@@ -101,6 +118,7 @@ impl RenderContext {
             pv.set_camera(&mut camera);
             pv.set_viewport(0, 0, window_size.width, window_size.height);
             pv.set_post_processing_enabled(false);
+            pv.set_visible_layers(0xFF, LAYER_SCENE | LAYER_OVERLAY);
             if let Some(ps) = &pick_system {
                 pv.set_render_target(Some(ps.render_target()));
             }
@@ -111,11 +129,19 @@ impl RenderContext {
 
         // No lights created at startup - user adds them via UI
 
+        let editor_overlay = editor_overlay::EditorOverlay::new(
+            &mut engine,
+            &mut scene,
+            &mut entity_manager,
+            LAYER_OVERLAY,
+        );
+
         Ok(Self {
             engine,
             swap_chain,
             renderer,
             view,
+            overlay_view,
             ui_view: None,
             ui_helper: None,
             scene,
@@ -130,6 +156,7 @@ impl RenderContext {
             pick_system,
             pick_view,
             pending_pick_entities: None,
+            editor_overlay,
         })
     }
 
@@ -147,6 +174,9 @@ impl RenderContext {
         let aspect = new_size.width as f64 / new_size.height as f64;
         self.camera
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
+        if let Some(overlay_view) = &mut self.overlay_view {
+            overlay_view.set_viewport(0, 0, new_size.width, new_size.height);
+        }
         if let Some(ui_view) = &mut self.ui_view {
             ui_view.set_viewport(0, 0, new_size.width, new_size.height);
         }
@@ -367,6 +397,9 @@ impl RenderContext {
                 }
             }
             self.renderer.render(&self.view);
+            if let Some(overlay_view) = &self.overlay_view {
+                self.renderer.render(overlay_view);
+            }
             if let Some(ui_view) = &self.ui_view {
                 self.renderer.render(ui_view);
             }
@@ -494,6 +527,9 @@ impl RenderContext {
             return;
         }
         self.view.set_scene(&mut self.scene);
+        if let Some(overlay_view) = &mut self.overlay_view {
+            overlay_view.set_scene(&mut self.scene);
+        }
         if let Some(pick_view) = &mut self.pick_view {
             pick_view.set_scene(&mut self.scene);
         }
@@ -530,12 +566,16 @@ impl RenderContext {
     /// The actual rendering happens inside render_scene_ui's frame.
     ///
     /// `pickable_entities` maps (object_id, entities) for each pickable scene object.
-    pub fn execute_pick_pass(&mut self, pickable_entities: &[(u32, Vec<Entity>)]) {
+    pub fn execute_pick_pass(&mut self, pickable_entities: &[(PickKey, Vec<Entity>)]) {
         let has_pending = self.pick_system.as_ref().map_or(false, |ps| ps.has_pending_pick());
         if !has_pending {
             return;
         }
-        self.pending_pick_entities = Some(pickable_entities.to_vec());
+        let mut merged = pickable_entities.to_vec();
+        if let Some(overlay) = &self.editor_overlay {
+            merged.extend(overlay.pickable_entities());
+        }
+        self.pending_pick_entities = Some(merged);
     }
 
     /// Take the latest pick result, if available.
@@ -546,6 +586,12 @@ impl RenderContext {
     /// Whether GPU picking is available.
     pub fn has_pick_system(&self) -> bool {
         self.pick_system.is_some()
+    }
+
+    pub fn update_gizmo_overlay(&mut self, params: GizmoParams) {
+        if let Some(overlay) = &mut self.editor_overlay {
+            overlay.set_params(&mut self.engine, params);
+        }
     }
 }
 
