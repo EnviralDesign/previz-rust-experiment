@@ -1,0 +1,18 @@
+material {
+    name : PickId,
+    parameters : [
+        { type : float4, name : pickColor }
+    ],
+    shadingModel : unlit,
+    culling : none,
+    depthWrite : true,
+    depthCulling : true,
+    featureLevel : 0
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        material.baseColor = materialParams.pickColor;
+    }
+}

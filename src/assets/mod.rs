@@ -10,6 +10,8 @@ pub struct LoadedAsset {
     pub center: [f32; 3],
     pub extent: [f32; 3],
     pub root_entity: Entity,
+    /// All renderable sub-entities (for GPU pick pass).
+    pub renderable_entities: Vec<Entity>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +144,7 @@ impl AssetManager {
 
         let (center, extent) = asset.bounding_box();
         let root_entity = asset.root_entity();
+        let renderable_entities = asset.renderable_entities();
         let name = PathBuf::from(path)
             .file_name()
             .and_then(|value| value.to_str())
@@ -152,6 +155,7 @@ impl AssetManager {
             center,
             extent,
             root_entity,
+            renderable_entities,
         };
 
         // Keep asset alive by storing it (prevents Drop from destroying entities)

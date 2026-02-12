@@ -37,10 +37,13 @@
 #include <gltfio/TextureProvider.h>
 #include <utils/EntityManager.h>
 #include <backend/DriverEnums.h>
+#include <backend/PixelBufferDescriptor.h>
+#include <filament/RenderTarget.h>
 #include <image/Ktx1Bundle.h>
 #include <ktxreader/Ktx1Reader.h>
 #include <fstream>
 #include <vector>
+#include <atomic>
 
 using namespace filament;
 using namespace utils;
@@ -1960,6 +1963,164 @@ void filagui_imgui_helper_render_scene_ui(
 
         ImGui::End();
     });
+}
+
+// ============================================================================
+// GPU Pick Pass - Texture, RenderTarget, Readback, Material Swap
+// ============================================================================
+
+Texture* filament_texture_create_2d(
+    Engine* engine,
+    uint32_t width,
+    uint32_t height,
+    uint8_t internal_format,
+    uint32_t usage_flags
+) {
+    if (!engine || width == 0 || height == 0) {
+        return nullptr;
+    }
+    return Texture::Builder()
+        .width(width)
+        .height(height)
+        .levels(1)
+        .format(static_cast<Texture::InternalFormat>(internal_format))
+        .usage(static_cast<Texture::Usage>(usage_flags))
+        .build(*engine);
+}
+
+RenderTarget* filament_render_target_create(
+    Engine* engine,
+    Texture* color,
+    Texture* depth
+) {
+    if (!engine || !color) {
+        return nullptr;
+    }
+    auto builder = RenderTarget::Builder()
+        .texture(RenderTarget::AttachmentPoint::COLOR, color);
+    if (depth) {
+        builder.texture(RenderTarget::AttachmentPoint::DEPTH, depth);
+    }
+    return builder.build(*engine);
+}
+
+void filament_engine_destroy_render_target(Engine* engine, RenderTarget* target) {
+    if (engine && target) {
+        engine->destroy(target);
+    }
+}
+
+void filament_view_set_render_target(View* view, RenderTarget* target) {
+    if (!view) {
+        return;
+    }
+    // pass nullptr to clear the render target (render to swap chain)
+    view->setRenderTarget(target);
+}
+
+// Synchronous 1x1 pixel readback from a render target.
+// Must be called AFTER endFrame() and BEFORE the next beginFrame().
+// Caller must call engine->flushAndWait() afterwards to ensure completion.
+bool filament_renderer_read_pixels(
+    Renderer* renderer,
+    RenderTarget* render_target,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    uint8_t* out_buffer,
+    uint32_t buffer_size
+) {
+    if (!renderer || !render_target || !out_buffer || buffer_size == 0) {
+        return false;
+    }
+    const uint32_t pixel_count = width * height;
+    const uint32_t required = pixel_count * 4; // RGBA8
+    if (buffer_size < required) {
+        return false;
+    }
+    std::atomic<bool> done{false};
+    auto pbd = backend::PixelBufferDescriptor(
+        out_buffer,
+        required,
+        backend::PixelDataFormat::RGBA,
+        backend::PixelDataType::UBYTE,
+        [](void* /*buffer*/, size_t /*size*/, void* user) {
+            auto* flag = static_cast<std::atomic<bool>*>(user);
+            flag->store(true, std::memory_order_release);
+        },
+        &done
+    );
+    renderer->readPixels(render_target, x, y, width, height, std::move(pbd));
+    return true; // Caller must flushAndWait() to complete
+}
+
+// ============================================================================
+// RenderableManager - material swap for pick pass
+// ============================================================================
+
+int32_t filament_renderable_get_primitive_count(
+    Engine* engine,
+    int32_t entity_id
+) {
+    if (!engine) return 0;
+    auto& rm = engine->getRenderableManager();
+    Entity entity = Entity::import(entity_id);
+    auto instance = rm.getInstance(entity);
+    if (!instance) return 0;
+    return static_cast<int32_t>(rm.getPrimitiveCount(instance));
+}
+
+MaterialInstance* filament_renderable_get_material_at(
+    Engine* engine,
+    int32_t entity_id,
+    int32_t primitive_index
+) {
+    if (!engine) return nullptr;
+    auto& rm = engine->getRenderableManager();
+    Entity entity = Entity::import(entity_id);
+    auto instance = rm.getInstance(entity);
+    if (!instance) return nullptr;
+    return rm.getMaterialInstanceAt(instance, static_cast<size_t>(primitive_index));
+}
+
+void filament_renderable_set_material_at(
+    Engine* engine,
+    int32_t entity_id,
+    int32_t primitive_index,
+    MaterialInstance* mi
+) {
+    if (!engine || !mi) return;
+    auto& rm = engine->getRenderableManager();
+    Entity entity = Entity::import(entity_id);
+    auto instance = rm.getInstance(entity);
+    if (!instance) return;
+    rm.setMaterialInstanceAt(instance, static_cast<size_t>(primitive_index), mi);
+}
+
+// Get all renderable entities from a gltfio FilamentAsset
+int32_t filament_gltfio_asset_get_entities(
+    FilamentAsset* asset,
+    int32_t* out_entities,
+    int32_t max_count
+) {
+    if (!asset || !out_entities || max_count <= 0) return 0;
+    size_t count = asset->getRenderableEntityCount();
+    if (count > static_cast<size_t>(max_count)) {
+        count = static_cast<size_t>(max_count);
+    }
+    const Entity* entities = asset->getRenderableEntities();
+    for (size_t i = 0; i < count; i++) {
+        out_entities[i] = Entity::smuggle(entities[i]);
+    }
+    return static_cast<int32_t>(count);
+}
+
+int32_t filament_gltfio_asset_get_renderable_entity_count(
+    FilamentAsset* asset
+) {
+    if (!asset) return 0;
+    return static_cast<int32_t>(asset->getRenderableEntityCount());
 }
 
 } // extern "C"

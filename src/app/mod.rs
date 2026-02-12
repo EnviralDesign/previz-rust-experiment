@@ -1058,6 +1058,7 @@ impl App {
         let mut pending_update_light_command: Option<SceneCommand> = None;
         let mut pending_update_environment_command: Option<SceneCommand> = None;
         let mut pending_set_material_command: Option<SceneCommand> = None;
+        let mut pick_hit: Option<crate::render::PickHit> = None;
         let (mut hdr_path_string, mut ibl_path_string, mut skybox_path_string) = {
             let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
@@ -1070,6 +1071,35 @@ impl App {
                 for (index, down) in self.mouse_buttons.iter().enumerate() {
                     render.ui_mouse_button(index as i32, *down);
                 }
+
+                // GPU pick pass — execute before the beauty pass
+                if render.has_pick_system() {
+                    let pickable_entities: Vec<(u32, Vec<crate::filament::Entity>)> = self
+                        .scene
+                        .objects()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, obj)| {
+                            if let SceneObjectKind::Asset(_) = &obj.kind {
+                                let loaded = self.assets.loaded_assets().iter().find(|a| {
+                                    self.scene_runtime.get(index)
+                                        .and_then(|rt| rt.root_entity)
+                                        .map_or(false, |re| re == a.root_entity)
+                                });
+                                loaded.map(|a| (index as u32, a.renderable_entities.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !pickable_entities.is_empty() {
+                        log::info!("pickable_entities: {} groups, entities: {:?}",
+                            pickable_entities.len(),
+                            pickable_entities.iter().map(|(id, ents)| (*id, ents.len())).collect::<Vec<_>>());
+                    }
+                    render.execute_pick_pass(&pickable_entities);
+                }
+
                 let render_ms = render.render_scene_ui(
                     "Assets",
                     &ui_text,
@@ -1124,6 +1154,9 @@ impl App {
                     self.timing.frame_dt,
                 );
                 self.timing.set_render_ms(render_ms);
+
+                // Capture GPU pick result (processed after borrow scope)
+                pick_hit = render.take_pick_hit();
             }
             (
                 buffer_to_string(hdr_path),
@@ -1131,6 +1164,18 @@ impl App {
                 buffer_to_string(skybox_path),
             )
         };
+        // Process GPU pick result (outside borrow scope)
+        if let Some(hit) = pick_hit {
+            if hit.is_none() {
+                if self.transform_tool_mode == TransformToolMode::Select {
+                    self.set_selection_from_index(None);
+                }
+            } else if hit.key.kind == crate::render::PickKind::SceneMesh {
+                let index = hit.key.object_id as usize;
+                self.set_selection_from_index(Some(index));
+                log::info!("GPU pick: SceneMesh index={}", index);
+            }
+        }
         let previous_selection_id = self.selection_id;
         self.set_selection_from_index(Self::normalize_selection(selected_index, self.scene.objects().len()));
         selected_index = Self::selection_to_ui_index(self.current_selection_index());
@@ -3160,18 +3205,8 @@ impl ApplicationHandler for App {
                                 }
                                 (MouseButton::Left, false) => {
                                     if self.pending_click_select && self.gizmo_active_axis == 0 {
-                                        if let Some((mx, my)) = self.mouse_pos {
-                                            let picked = self.pick_scene_object(mx, my);
-                                            match picked {
-                                                Some(hit) => self.set_selection_from_index(Some(hit)),
-                                                None => {
-                                                    if self.transform_tool_mode
-                                                        == TransformToolMode::Select
-                                                    {
-                                                        self.set_selection_from_index(None);
-                                                    }
-                                                }
-                                            }
+                                        if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
+                                            render.request_pick(mx, my);
                                         }
                                     }
                                     self.pending_click_select = false;

@@ -1750,3 +1750,226 @@ impl RenderableBuilder {
         }
     }
 }
+
+// ========================================================================
+// GPU Pick Pass support types
+// ========================================================================
+
+/// Filament Texture::InternalFormat subset used by the pick pass.
+/// Values from filament/backend/include/backend/DriverEnums.h TextureFormat enum.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureInternalFormat {
+    Depth24 = 22,  // Filament DEPTH24 [22]
+    Rgba8 = 30,    // Filament RGBA8 [30]
+}
+
+/// Filament Texture::Usage flags (bitmask).
+/// Values from filament/backend/include/backend/DriverEnums.h TextureUsage enum.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureUsage {
+    ColorAttachment = 0x0001,
+    DepthAttachment = 0x0002,
+    Sampleable = 0x0010,
+    BlitSrc = 0x0040,
+}
+
+impl TextureUsage {
+    /// Combine usage flags with bitwise OR.
+    pub fn or(self, other: Self) -> u32 {
+        self as u32 | other as u32
+    }
+
+    /// Combine three usage flags with bitwise OR.
+    pub fn or3(a: Self, b: Self, c: Self) -> u32 {
+        a as u32 | b as u32 | c as u32
+    }
+}
+
+/// Offscreen render target for the pick pass.
+pub struct RenderTarget {
+    ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
+}
+
+impl Drop for RenderTarget {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::filament_engine_destroy_render_target(
+                self.engine.as_ptr() as *mut _,
+                self.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+}
+
+// --- Engine extensions for pick pass ---
+
+impl Engine {
+    /// Create a 2D texture for the pick pass (color or depth).
+    pub fn create_texture_2d(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: TextureInternalFormat,
+        usage_flags: u32,
+    ) -> Option<Texture> {
+        unsafe {
+            let ptr = ffi::filament_texture_create_2d(
+                self.ptr.as_ptr() as *mut _,
+                width,
+                height,
+                format as u8,
+                usage_flags,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| Texture {
+                ptr,
+                engine: self.ptr,
+                owned: true,
+            })
+        }
+    }
+
+    /// Create a render target from a color texture and optional depth texture.
+    pub fn create_render_target(
+        &mut self,
+        color: &Texture,
+        depth: Option<&Texture>,
+    ) -> Option<RenderTarget> {
+        let depth_ptr = depth
+            .map(|d| d.ptr.as_ptr() as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+        unsafe {
+            let ptr = ffi::filament_render_target_create(
+                self.ptr.as_ptr() as *mut _,
+                color.ptr.as_ptr() as *mut _,
+                depth_ptr,
+            );
+            NonNull::new(ptr as *mut c_void).map(|ptr| RenderTarget {
+                ptr,
+                engine: self.ptr,
+            })
+        }
+    }
+
+    /// Get the number of primitives on a renderable entity.
+    pub fn renderable_primitive_count(&mut self, entity: Entity) -> i32 {
+        unsafe {
+            ffi::filament_renderable_get_primitive_count(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+            )
+        }
+    }
+
+    /// Get the material instance at a primitive index on a renderable entity.
+    /// Returns a raw pointer (non-owning) since we need to restore it later.
+    pub fn renderable_get_material_raw(&mut self, entity: Entity, primitive_index: i32) -> *mut c_void {
+        unsafe {
+            ffi::filament_renderable_get_material_at(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+                primitive_index,
+            ) as *mut c_void
+        }
+    }
+
+    /// Set the material instance at a primitive index on a renderable entity.
+    pub fn renderable_set_material(&mut self, entity: Entity, primitive_index: i32, mi: &MaterialInstance) {
+        unsafe {
+            ffi::filament_renderable_set_material_at(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+                primitive_index,
+                mi.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+
+    /// Restore a previously saved raw material pointer on a renderable.
+    pub fn renderable_restore_material_raw(&mut self, entity: Entity, primitive_index: i32, raw_ptr: *mut c_void) {
+        unsafe {
+            ffi::filament_renderable_set_material_at(
+                self.ptr.as_ptr() as *mut _,
+                entity.id,
+                primitive_index,
+                raw_ptr as *mut _,
+            );
+        }
+    }
+}
+
+// --- View extensions for pick pass ---
+
+impl View {
+    /// Set the render target for offscreen rendering (pass None to render to swap chain).
+    pub fn set_render_target(&mut self, target: Option<&RenderTarget>) {
+        let ptr = target
+            .map(|t| t.ptr.as_ptr() as *mut _)
+            .unwrap_or(std::ptr::null_mut());
+        unsafe {
+            ffi::filament_view_set_render_target(self.ptr.as_ptr() as *mut _, ptr);
+        }
+    }
+}
+
+// --- Renderer extensions for pick pass ---
+
+impl Renderer {
+    /// Schedule a pixel readback from a render target.
+    /// Call *after* end_frame() and *before* next begin_frame().
+    /// The caller must call engine.flush_and_wait() after this to ensure completion.
+    /// `buffer` must have space for width * height * 4 bytes (RGBA8).
+    pub fn read_pixels(
+        &mut self,
+        render_target: &RenderTarget,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        buffer: &mut [u8],
+    ) -> bool {
+        unsafe {
+            ffi::filament_renderer_read_pixels(
+                self.ptr.as_ptr() as *mut _,
+                render_target.ptr.as_ptr() as *mut _,
+                x,
+                y,
+                width,
+                height,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        }
+    }
+}
+
+// --- GltfAsset extensions for pick pass ---
+
+impl GltfAsset {
+    /// Get the renderable entity count for this asset.
+    pub fn renderable_entity_count(&self) -> i32 {
+        unsafe {
+            ffi::filament_gltfio_asset_get_renderable_entity_count(self.ptr.as_ptr() as *mut _)
+        }
+    }
+
+    /// Get all renderable entities as a Vec<Entity>.
+    pub fn renderable_entities(&self) -> Vec<Entity> {
+        let count = self.renderable_entity_count();
+        if count <= 0 {
+            return Vec::new();
+        }
+        let mut ids = vec![0i32; count as usize];
+        let actual = unsafe {
+            ffi::filament_gltfio_asset_get_entities(
+                self.ptr.as_ptr() as *mut _,
+                ids.as_mut_ptr(),
+                count,
+            )
+        };
+        ids.truncate(actual.max(0) as usize);
+        ids.into_iter().map(|id| Entity { id }).collect()
+    }
+}

@@ -28,6 +28,7 @@ pub type TextureProvider = c_void;
 pub type FilamentAsset = c_void;
 pub type FilamentInstance = c_void;
 pub type ImGuiHelper = c_void;
+pub type RenderTarget = c_void;
 
 // Builder wrapper types (opaque)
 pub type MaterialBuilderWrapper = c_void;
@@ -569,4 +570,79 @@ extern "C" {
         camera_world_xyz: *const f32,
         gizmo_active_axis: *mut i32,
     );
+
+    // ========================================================================
+    // GPU Pick Pass - Texture, RenderTarget, Readback
+    // ========================================================================
+
+    pub fn filament_texture_create_2d(
+        engine: *mut Engine,
+        width: u32,
+        height: u32,
+        internal_format: u8,
+        usage_flags: u32,
+    ) -> *mut Texture;
+
+    pub fn filament_render_target_create(
+        engine: *mut Engine,
+        color: *mut Texture,
+        depth: *mut Texture,
+    ) -> *mut RenderTarget;
+
+    pub fn filament_engine_destroy_render_target(
+        engine: *mut Engine,
+        target: *mut RenderTarget,
+    );
+
+    pub fn filament_view_set_render_target(
+        view: *mut View,
+        target: *mut RenderTarget,
+    );
+
+    pub fn filament_renderer_read_pixels(
+        renderer: *mut Renderer,
+        render_target: *mut RenderTarget,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        out_buffer: *mut u8,
+        buffer_size: u32,
+    ) -> bool;
+
+    // ========================================================================
+    // RenderableManager - material swap for pick pass
+    // ========================================================================
+
+    pub fn filament_renderable_get_primitive_count(
+        engine: *mut Engine,
+        entity_id: i32,
+    ) -> i32;
+
+    pub fn filament_renderable_get_material_at(
+        engine: *mut Engine,
+        entity_id: i32,
+        primitive_index: i32,
+    ) -> *mut MaterialInstance;
+
+    pub fn filament_renderable_set_material_at(
+        engine: *mut Engine,
+        entity_id: i32,
+        primitive_index: i32,
+        mi: *mut MaterialInstance,
+    );
+
+    // ========================================================================
+    // gltfio - entity enumeration
+    // ========================================================================
+
+    pub fn filament_gltfio_asset_get_entities(
+        asset: *mut FilamentAsset,
+        out_entities: *mut i32,
+        max_count: i32,
+    ) -> i32;
+
+    pub fn filament_gltfio_asset_get_renderable_entity_count(
+        asset: *mut FilamentAsset,
+    ) -> i32;
 }

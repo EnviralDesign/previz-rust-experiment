@@ -1,6 +1,8 @@
 mod camera;
+pub mod pick;
 
 pub use camera::{CameraController, CameraMovement};
+pub use pick::{PickHit, PickKind, PickSystem};
 
 use crate::filament::{
     Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox,
@@ -56,6 +58,10 @@ pub struct RenderContext {
     skybox: Option<Skybox>,
     skybox_texture: Option<Texture>,
     material_textures: Vec<Texture>,
+    // GPU pick pass
+    pick_system: Option<PickSystem>,
+    pick_view: Option<View>,
+    pending_pick_entities: Option<Vec<(u32, Vec<Entity>)>>,
 }
 
 impl RenderContext {
@@ -87,6 +93,22 @@ impl RenderContext {
         view.set_scene(&mut scene);
         view.set_camera(&mut camera);
 
+        // Initialize GPU pick system
+        let pick_system = PickSystem::new(&mut engine, window_size.width, window_size.height);
+        let mut pick_view = engine.create_view();
+        if let Some(pv) = &mut pick_view {
+            pv.set_scene(&mut scene);
+            pv.set_camera(&mut camera);
+            pv.set_viewport(0, 0, window_size.width, window_size.height);
+            pv.set_post_processing_enabled(false);
+            if let Some(ps) = &pick_system {
+                pv.set_render_target(Some(ps.render_target()));
+            }
+        }
+        if pick_system.is_none() {
+            log::warn!("GPU pick system failed to initialize; scene picking disabled.");
+        }
+
         // No lights created at startup - user adds them via UI
 
         Ok(Self {
@@ -105,6 +127,9 @@ impl RenderContext {
             skybox: None,
             skybox_texture: None,
             material_textures: Vec::new(),
+            pick_system,
+            pick_view,
+            pending_pick_entities: None,
         })
     }
 
@@ -124,6 +149,14 @@ impl RenderContext {
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
         if let Some(ui_view) = &mut self.ui_view {
             ui_view.set_viewport(0, 0, new_size.width, new_size.height);
+        }
+        // Resize pick system
+        if let Some(ps) = &mut self.pick_system {
+            ps.resize(&mut self.engine, new_size.width, new_size.height);
+            if let Some(pv) = &mut self.pick_view {
+                pv.set_viewport(0, 0, new_size.width, new_size.height);
+                pv.set_render_target(Some(ps.render_target()));
+            }
         }
         if let Some(ui_helper) = &mut self.ui_helper {
             ui_helper.set_display_size(
@@ -322,12 +355,32 @@ impl RenderContext {
             );
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {
+            // GPU pick pass — render to offscreen RT before beauty pass
+            if let Some(pickable) = self.pending_pick_entities.take() {
+                if let (Some(ps), Some(pv)) = (&mut self.pick_system, &self.pick_view) {
+                    ps.render_pick_pass(
+                        &mut self.engine,
+                        &mut self.renderer,
+                        pv,
+                        &pickable,
+                    );
+                }
+            }
             self.renderer.render(&self.view);
             if let Some(ui_view) = &self.ui_view {
                 self.renderer.render(ui_view);
             }
             self.renderer.end_frame();
         }
+        // Pick readback — after endFrame, before next beginFrame
+        if let Some(ps) = &mut self.pick_system {
+            if ps.has_pending_pick() {
+                if ps.readback(&mut self.renderer) {
+                    self.engine.flush_and_wait();
+                }
+            }
+        }
+
         let render_end = std::time::Instant::now();
         render_end
             .saturating_duration_since(frame_start)
@@ -455,6 +508,40 @@ impl RenderContext {
 
     pub fn flush_and_wait(&mut self) {
         self.engine.flush_and_wait();
+    }
+
+    // ====================================================================
+    // GPU Pick Pass public API
+    // ====================================================================
+
+    /// Request a GPU pick at the given screen coordinates (top-left origin).
+    /// The pick will be executed on the next call to `execute_pick_pass`.
+    pub fn request_pick(&mut self, screen_x: f32, screen_y: f32) {
+        if let Some(ps) = &mut self.pick_system {
+            ps.request_pick(screen_x, screen_y);
+        }
+    }
+
+    /// Stage pickable entities for the GPU pick pass.
+    /// The actual rendering happens inside render_scene_ui's frame.
+    ///
+    /// `pickable_entities` maps (object_id, entities) for each pickable scene object.
+    pub fn execute_pick_pass(&mut self, pickable_entities: &[(u32, Vec<Entity>)]) {
+        let has_pending = self.pick_system.as_ref().map_or(false, |ps| ps.has_pending_pick());
+        if !has_pending {
+            return;
+        }
+        self.pending_pick_entities = Some(pickable_entities.to_vec());
+    }
+
+    /// Take the latest pick result, if available.
+    pub fn take_pick_hit(&mut self) -> Option<PickHit> {
+        self.pick_system.as_mut().and_then(|ps| ps.take_hit())
+    }
+
+    /// Whether GPU picking is available.
+    pub fn has_pick_system(&self) -> bool {
+        self.pick_system.is_some()
     }
 }
 
