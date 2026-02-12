@@ -1,6 +1,39 @@
 use crate::assets::AssetManager;
 use crate::scene::{SceneRuntime, SceneState};
 
+pub const MATERIAL_TEXTURE_PARAMS: [&str; 5] = [
+    "baseColorMap",
+    "normalMap",
+    "metallicRoughnessMap",
+    "occlusionMap",
+    "emissiveMap",
+];
+
+#[derive(Debug, Clone, Copy)]
+pub struct MaterialBindingUiRow {
+    pub source: [u8; 260],
+    pub wrap_repeat_u: bool,
+    pub wrap_repeat_v: bool,
+    pub srgb: bool,
+    pub uv_offset: [f32; 2],
+    pub uv_scale: [f32; 2],
+    pub uv_rotation_deg: f32,
+}
+
+impl Default for MaterialBindingUiRow {
+    fn default() -> Self {
+        Self {
+            source: [0u8; 260],
+            wrap_repeat_u: true,
+            wrap_repeat_v: true,
+            srgb: true,
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            uv_rotation_deg: 0.0,
+        }
+    }
+}
+
 pub struct UiState {
     show_asset_panel: bool,
     asset_summary: String,
@@ -10,8 +43,7 @@ pub struct UiState {
     material_params: MaterialParams,
     material_texture_param: [u8; 128],
     material_texture_source: [u8; 260],
-    material_wrap_repeat_u: bool,
-    material_wrap_repeat_v: bool,
+    material_binding_rows: [MaterialBindingUiRow; 5],
     environment_hdr_path: [u8; 260],
     environment_ibl_path: [u8; 260],
     environment_skybox_path: [u8; 260],
@@ -59,8 +91,7 @@ impl UiState {
                 buf
             },
             material_texture_source: [0u8; 260],
-            material_wrap_repeat_u: true,
-            material_wrap_repeat_v: true,
+            material_binding_rows: [MaterialBindingUiRow::default(); 5],
             environment_hdr_path: [0u8; 260],
             environment_ibl_path: [0u8; 260],
             environment_skybox_path: [0u8; 260],
@@ -128,10 +159,6 @@ impl UiState {
         self.material_params = params;
     }
 
-    pub fn material_texture_binding_mut(&mut self) -> (&mut [u8; 128], &mut [u8; 260]) {
-        (&mut self.material_texture_param, &mut self.material_texture_source)
-    }
-
     pub fn texture_and_environment_paths_mut(
         &mut self,
     ) -> (
@@ -150,13 +177,12 @@ impl UiState {
         )
     }
 
-    pub fn material_wrap_repeat(&self) -> (bool, bool) {
-        (self.material_wrap_repeat_u, self.material_wrap_repeat_v)
+    pub fn material_binding_rows_mut(&mut self) -> &mut [MaterialBindingUiRow; 5] {
+        &mut self.material_binding_rows
     }
 
-    pub fn set_material_wrap_repeat(&mut self, wrap_u: bool, wrap_v: bool) {
-        self.material_wrap_repeat_u = wrap_u;
-        self.material_wrap_repeat_v = wrap_v;
+    pub fn material_binding_rows(&self) -> &[MaterialBindingUiRow; 5] {
+        &self.material_binding_rows
     }
 
     pub fn environment_paths_mut(

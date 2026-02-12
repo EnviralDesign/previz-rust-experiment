@@ -27,6 +27,7 @@
 #include <filament/RenderableManager.h>
 #include <cstring>
 #include <cmath>
+#include <cfloat>
 #include <filament/TransformManager.h>
 #include <gltfio/AssetLoader.h>
 #include <gltfio/FilamentAsset.h>
@@ -1128,14 +1129,18 @@ void filagui_imgui_helper_render_scene_ui(
     float* material_metallic,
     float* material_roughness,
     float* material_emissive_rgb,
-    char* material_texture_param,
-    int material_texture_param_capacity,
-    char* material_texture_source,
-    int material_texture_source_capacity,
-    bool* material_wrap_repeat_u,
-    bool* material_wrap_repeat_v,
-    bool* material_pick_texture,
-    bool* material_apply_texture,
+    const char** material_binding_param_names,
+    int material_binding_count,
+    char* material_binding_sources,
+    int material_binding_source_stride,
+    bool* material_binding_wrap_repeat_u,
+    bool* material_binding_wrap_repeat_v,
+    bool* material_binding_srgb,
+    float* material_binding_uv_offset,
+    float* material_binding_uv_scale,
+    float* material_binding_uv_rotation_deg,
+    int* material_binding_pick_index,
+    int* material_binding_apply_index,
     char* hdr_path,
     int hdr_path_capacity,
     char* ibl_path,
@@ -1152,7 +1157,14 @@ void filagui_imgui_helper_render_scene_ui(
     bool* create_light,
     bool* create_environment,
     bool* save_scene,
-    bool* load_scene
+    bool* load_scene,
+    int* transform_tool_mode,
+    bool* delete_selected,
+    const float* gizmo_screen_points_xy,
+    bool gizmo_visible,
+    const float* gizmo_origin_world_xyz,
+    const float* camera_world_xyz,
+    int* gizmo_active_axis
 ) {
     if (!helper) {
         return;
@@ -1166,9 +1178,9 @@ void filagui_imgui_helper_render_scene_ui(
         float gutter = 12.0f;
 
         // Left sidebar - single window with Main Menu and Hierarchy as groups
-        ImGui::SetNextWindowPos(work_pos, ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(left_width, work_size.y), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Scene");
+        ImGui::SetNextWindowPos(work_pos, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(left_width, work_size.y), ImGuiCond_Always);
+        ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
 
         // Main Menu group
         if (ImGui::CollapsingHeader("Main Menu", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1241,9 +1253,9 @@ void filagui_imgui_helper_render_scene_ui(
 
         ImGui::SetNextWindowPos(
             ImVec2(work_pos.x + work_size.x - right_width - gutter, work_pos.y),
-            ImGuiCond_FirstUseEver
+            ImGuiCond_Always
         );
-        ImGui::SetNextWindowSize(ImVec2(right_width, work_size.y), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(right_width, work_size.y), ImGuiCond_Always);
         int current = selected_index ? *selected_index : -1;
         const char* selected_name = "None";
         if (current >= 0 && current < object_count && object_names) {
@@ -1252,9 +1264,39 @@ void filagui_imgui_helper_render_scene_ui(
                 selected_name = name;
             }
         }
-        ImGui::Begin("Inspector");
+        ImGui::Begin("Inspector", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize);
         ImGui::Text("Inspector - %s", selected_name);
         ImGui::Separator();
+        if (ImGui::CollapsingHeader("Tools", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextUnformatted("Shortcuts: Q/W/E/R tools, Delete removes selection");
+            if (transform_tool_mode) {
+                ImGui::TextUnformatted("Transform");
+                int mode = *transform_tool_mode;
+                if (ImGui::RadioButton("Select", mode == 0)) {
+                    mode = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Translate", mode == 1)) {
+                    mode = 1;
+                }
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Rotate", mode == 2)) {
+                    mode = 2;
+                }
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Scale", mode == 3)) {
+                    mode = 3;
+                }
+                *transform_tool_mode = mode;
+            }
+            if (delete_selected) {
+                *delete_selected = false;
+                if (ImGui::Button("Delete Selected", ImVec2(-1, 0))) {
+                    *delete_selected = true;
+                }
+            }
+            ImGui::Separator();
+        }
 
         bool show_transform = selected_kind && *selected_kind == 0;
         if (show_transform && ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1304,6 +1346,12 @@ void filagui_imgui_helper_render_scene_ui(
 
         bool show_materials = selected_kind && *selected_kind == 0;
         if (show_materials && ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (material_binding_pick_index) {
+                *material_binding_pick_index = -1;
+            }
+            if (material_binding_apply_index) {
+                *material_binding_apply_index = -1;
+            }
             if (!material_names || material_count <= 0) {
                 ImGui::TextUnformatted("No materials loaded.");
             } else {
@@ -1343,56 +1391,60 @@ void filagui_imgui_helper_render_scene_ui(
                 ImGui::ColorEdit3("Emissive", material_emissive_rgb);
             }
             ImGui::Separator();
-            if (material_texture_param && material_texture_param_capacity > 0) {
-                ImGui::TextUnformatted("Texture Param (Advanced)");
-                ImGui::InputText(
-                    "##TextureParam",
-                    material_texture_param,
-                    (size_t)material_texture_param_capacity
-                );
-                if (material_texture_param_capacity > 0) {
-                    if (ImGui::Button("Base Color")) {
-                        std::snprintf(material_texture_param, (size_t)material_texture_param_capacity, "%s", "baseColorMap");
-                    }
+            if (material_binding_param_names && material_binding_count > 0 &&
+                material_binding_sources && material_binding_source_stride > 1) {
+                ImGui::TextUnformatted("Texture Bindings");
+                for (int i = 0; i < material_binding_count; ++i) {
+                    const char* param_name = material_binding_param_names[i] ? material_binding_param_names[i] : "texture";
+                    char* source = material_binding_sources + (i * material_binding_source_stride);
+                    bool* wrap_u = material_binding_wrap_repeat_u ? &material_binding_wrap_repeat_u[i] : nullptr;
+                    bool* wrap_v = material_binding_wrap_repeat_v ? &material_binding_wrap_repeat_v[i] : nullptr;
+                    bool* srgb = material_binding_srgb ? &material_binding_srgb[i] : nullptr;
+                    float* uv_offset = material_binding_uv_offset ? &material_binding_uv_offset[i * 2] : nullptr;
+                    float* uv_scale = material_binding_uv_scale ? &material_binding_uv_scale[i * 2] : nullptr;
+                    float* uv_rotation = material_binding_uv_rotation_deg ? &material_binding_uv_rotation_deg[i] : nullptr;
+
+                    ImGui::PushID(i);
+                    ImGui::SeparatorText(param_name);
+                    float button_w = 32.0f;
+                    float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+                    ImGui::SetNextItemWidth(-button_w - spacing);
+                    ImGui::InputText("##TextureSource", source, (size_t)material_binding_source_stride);
                     ImGui::SameLine();
-                    if (ImGui::Button("Normal")) {
-                        std::snprintf(material_texture_param, (size_t)material_texture_param_capacity, "%s", "normalMap");
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Emissive")) {
-                        std::snprintf(material_texture_param, (size_t)material_texture_param_capacity, "%s", "emissiveMap");
-                    }
-                }
-            }
-            if (material_texture_source && material_texture_source_capacity > 0) {
-                ImGui::TextUnformatted("Texture Source");
-                float button_w = 32.0f;
-                float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
-                ImGui::SetNextItemWidth(-button_w - spacing);
-                ImGui::InputText(
-                    "##TextureSource",
-                    material_texture_source,
-                    (size_t)material_texture_source_capacity
-                );
-                if (material_pick_texture) {
-                    ImGui::SameLine();
-                    *material_pick_texture = false;
                     if (ImGui::Button("...", ImVec2(button_w, 0))) {
-                        *material_pick_texture = true;
+                        if (material_binding_pick_index) {
+                            *material_binding_pick_index = i;
+                        }
                     }
+                    if (srgb) {
+                        ImGui::Checkbox("sRGB", srgb);
+                        ImGui::SameLine();
+                    }
+                    if (wrap_u) {
+                        ImGui::Checkbox("Wrap U", wrap_u);
+                        ImGui::SameLine();
+                    }
+                    if (wrap_v) {
+                        ImGui::Checkbox("Wrap V", wrap_v);
+                    }
+                    if (uv_offset) {
+                        ImGui::DragFloat2("UV Offset", uv_offset, 0.001f, -100.0f, 100.0f, "%.3f");
+                    }
+                    if (uv_scale) {
+                        ImGui::DragFloat2("UV Scale", uv_scale, 0.001f, -100.0f, 100.0f, "%.3f");
+                    }
+                    if (uv_rotation) {
+                        ImGui::DragFloat("UV Rotation (deg)", uv_rotation, 0.1f, -360.0f, 360.0f, "%.2f");
+                    }
+                    if (ImGui::Button("Apply", ImVec2(-1, 0))) {
+                        if (material_binding_apply_index) {
+                            *material_binding_apply_index = i;
+                        }
+                    }
+                    ImGui::PopID();
                 }
-            }
-            if (material_wrap_repeat_u) {
-                ImGui::Checkbox("Wrap U Repeat", material_wrap_repeat_u);
-            }
-            if (material_wrap_repeat_v) {
-                ImGui::Checkbox("Wrap V Repeat", material_wrap_repeat_v);
-            }
-            if (material_apply_texture) {
-                *material_apply_texture = false;
-                if (ImGui::Button("Apply From Fields", ImVec2(-1, 0))) {
-                    *material_apply_texture = true;
-                }
+            } else {
+                ImGui::TextUnformatted("Texture binding rows unavailable.");
             }
             if (!has_material) {
                 ImGui::EndDisabled();
@@ -1404,7 +1456,7 @@ void filagui_imgui_helper_render_scene_ui(
             float button_w = 32.0f;
             float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
             if (hdr_path && hdr_path_capacity > 0) {
-                ImGui::TextUnformatted("Equirect HDR");
+                ImGui::TextUnformatted("HDR Source");
                 ImGui::SetNextItemWidth(-button_w - spacing);
                 ImGui::InputText("##EnvHdr", hdr_path, (size_t)hdr_path_capacity);
                 if (environment_pick_hdr) {
@@ -1415,45 +1467,456 @@ void filagui_imgui_helper_render_scene_ui(
                     }
                 }
             }
-            if (ibl_path && ibl_path_capacity > 0) {
-                ImGui::TextUnformatted("IBL KTX");
-                ImGui::SetNextItemWidth(-button_w - spacing);
-                ImGui::InputText("##EnvIbl", ibl_path, (size_t)ibl_path_capacity);
-                if (environment_pick_ibl) {
-                    ImGui::SameLine();
-                    *environment_pick_ibl = false;
-                    if (ImGui::Button("...##PickIbl", ImVec2(button_w, 0))) {
-                        *environment_pick_ibl = true;
-                    }
-                }
-            }
-            if (skybox_path && skybox_path_capacity > 0) {
-                ImGui::TextUnformatted("Skybox KTX");
-                ImGui::SetNextItemWidth(-button_w - spacing);
-                ImGui::InputText("##EnvSkybox", skybox_path, (size_t)skybox_path_capacity);
-                if (environment_pick_skybox) {
-                    ImGui::SameLine();
-                    *environment_pick_skybox = false;
-                    if (ImGui::Button("...##PickSkybox", ImVec2(button_w, 0))) {
-                        *environment_pick_skybox = true;
-                    }
-                }
-            }
             if (environment_intensity) {
                 ImGui::SliderFloat("Intensity", environment_intensity, 0.0f, 200000.0f, "%.1f");
             }
-            if (environment_generate) {
-                *environment_generate = false;
-                if (ImGui::Button("Generate KTX")) {
-                    *environment_generate = true;
-                }
-            }
-            ImGui::SameLine();
             if (environment_apply) {
                 *environment_apply = false;
-                if (ImGui::Button("Load Environment")) {
+                if (ImGui::Button("Apply HDR Environment")) {
                     *environment_apply = true;
                 }
+            }
+        }
+
+        // Viewport gizmo overlay: axis / plane / ring handles with mode-specific picking.
+        if (gizmo_active_axis) {
+            if (!ImGui::IsMouseDown(0)) {
+                *gizmo_active_axis = 0;
+            }
+            if (gizmo_visible && gizmo_screen_points_xy && transform_tool_mode) {
+                ImVec2 center(gizmo_screen_points_xy[0], gizmo_screen_points_xy[1]);
+                ImVec2 x_end(gizmo_screen_points_xy[2], gizmo_screen_points_xy[3]);
+                ImVec2 y_end(gizmo_screen_points_xy[4], gizmo_screen_points_xy[5]);
+                ImVec2 z_end(gizmo_screen_points_xy[6], gizmo_screen_points_xy[7]);
+                bool has_x = std::isfinite(x_end.x) && std::isfinite(x_end.y);
+                bool has_y = std::isfinite(y_end.x) && std::isfinite(y_end.y);
+                bool has_z = std::isfinite(z_end.x) && std::isfinite(z_end.y);
+                auto* draw = ImGui::GetForegroundDrawList();
+                if (*transform_tool_mode == 0) {
+                    *gizmo_active_axis = 0;
+                } else {
+                    auto vsub = [](ImVec2 a, ImVec2 b) -> ImVec2 { return ImVec2(a.x - b.x, a.y - b.y); };
+                    auto vadd = [](ImVec2 a, ImVec2 b) -> ImVec2 { return ImVec2(a.x + b.x, a.y + b.y); };
+                    auto vmul = [](ImVec2 a, float s) -> ImVec2 { return ImVec2(a.x * s, a.y * s); };
+                    auto vlen = [](ImVec2 v) -> float { return std::sqrt(v.x * v.x + v.y * v.y); };
+                    auto vnorm = [&](ImVec2 v) -> ImVec2 {
+                        float l = vlen(v);
+                        if (l <= 1e-5f) return ImVec2(0, 0);
+                        return ImVec2(v.x / l, v.y / l);
+                    };
+                    auto distance_to_segment = [](ImVec2 p, ImVec2 a, ImVec2 b) -> float {
+                        float vx = b.x - a.x;
+                        float vy = b.y - a.y;
+                        float wx = p.x - a.x;
+                        float wy = p.y - a.y;
+                        float c1 = vx * wx + vy * wy;
+                        if (c1 <= 0.0f) {
+                            float dx = p.x - a.x;
+                            float dy = p.y - a.y;
+                            return std::sqrt(dx * dx + dy * dy);
+                        }
+                        float c2 = vx * vx + vy * vy;
+                        if (c2 <= c1) {
+                            float dx = p.x - b.x;
+                            float dy = p.y - b.y;
+                            return std::sqrt(dx * dx + dy * dy);
+                        }
+                        float t = c1 / c2;
+                        ImVec2 proj(a.x + t * vx, a.y + t * vy);
+                        float dx = p.x - proj.x;
+                        float dy = p.y - proj.y;
+                        return std::sqrt(dx * dx + dy * dy);
+                    };
+                    auto cross2 = [](ImVec2 a, ImVec2 b, ImVec2 c) -> float {
+                        ImVec2 ab(b.x - a.x, b.y - a.y);
+                        ImVec2 ac(c.x - a.x, c.y - a.y);
+                        return ab.x * ac.y - ab.y * ac.x;
+                    };
+                    auto point_in_triangle = [&](ImVec2 p, ImVec2 a, ImVec2 b, ImVec2 c) -> bool {
+                        float c1 = cross2(a, b, p);
+                        float c2 = cross2(b, c, p);
+                        float c3 = cross2(c, a, p);
+                        bool has_neg = (c1 < 0) || (c2 < 0) || (c3 < 0);
+                        bool has_pos = (c1 > 0) || (c2 > 0) || (c3 > 0);
+                        return !(has_neg && has_pos);
+                    };
+                    auto point_in_quad = [&](ImVec2 p, ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d) -> bool {
+                        return point_in_triangle(p, a, b, c) || point_in_triangle(p, a, c, d);
+                    };
+                    auto polyline_distance = [&](ImVec2 p, const std::vector<ImVec2>& pts, bool closed) -> float {
+                        if (pts.size() < 2) {
+                            return FLT_MAX;
+                        }
+                        float best = FLT_MAX;
+                        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                            best = std::min(best, distance_to_segment(p, pts[i], pts[i + 1]));
+                        }
+                        if (closed) {
+                            best = std::min(best, distance_to_segment(p, pts.back(), pts.front()));
+                        }
+                        return best;
+                    };
+                    auto draw_arrow = [&](ImVec2 a, ImVec2 b, ImU32 color, float thickness) {
+                        draw->AddLine(a, b, color, thickness);
+                        ImVec2 dir = vnorm(vsub(b, a));
+                        ImVec2 ortho(-dir.y, dir.x);
+                        const float head_len = 12.0f;
+                        const float head_w = 6.0f;
+                        ImVec2 base = vsub(b, vmul(dir, head_len));
+                        ImVec2 l = vadd(base, vmul(ortho, head_w));
+                        ImVec2 r = vsub(base, vmul(ortho, head_w));
+                        draw->AddTriangleFilled(b, l, r, color);
+                    };
+                    auto draw_square_head = [&](ImVec2 a, ImVec2 b, ImU32 color, float thickness) {
+                        draw->AddLine(a, b, color, thickness);
+                        ImVec2 dir = vnorm(vsub(b, a));
+                        ImVec2 ortho(-dir.y, dir.x);
+                        const float size = 6.0f;
+                        ImVec2 c0 = vadd(vadd(b, vmul(dir, size)), vmul(ortho, size));
+                        ImVec2 c1 = vadd(vadd(b, vmul(dir, size)), vmul(ortho, -size));
+                        ImVec2 c2 = vadd(vadd(b, vmul(dir, -size)), vmul(ortho, -size));
+                        ImVec2 c3 = vadd(vadd(b, vmul(dir, -size)), vmul(ortho, size));
+                        draw->AddQuadFilled(c0, c1, c2, c3, color);
+                    };
+                    auto ring_points = [&](ImVec2 b1, ImVec2 b2, float radius_scale) -> std::vector<ImVec2> {
+                        std::vector<ImVec2> pts;
+                        const int segments = 64;
+                        pts.reserve((size_t)segments);
+                        for (int i = 0; i < segments; ++i) {
+                            float t = (float)i / (float)segments;
+                            float a = t * 6.28318530718f;
+                            float ca = std::cos(a);
+                            float sa = std::sin(a);
+                            ImVec2 p = vadd(center, vadd(vmul(b1, ca * radius_scale), vmul(b2, sa * radius_scale)));
+                            pts.push_back(p);
+                        }
+                        return pts;
+                    };
+                    auto normalize3 = [](float v[3]) {
+                        float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                        if (len > 1e-6f) {
+                            v[0] /= len;
+                            v[1] /= len;
+                            v[2] /= len;
+                        }
+                    };
+                    auto ring_front_mask = [&](int ring_axis, int count) -> std::vector<uint8_t> {
+                        std::vector<uint8_t> mask;
+                        mask.resize((size_t)count, 1);
+                        if (!gizmo_origin_world_xyz || !camera_world_xyz || count <= 0) {
+                            return mask;
+                        }
+                        float view_to_camera[3] = {
+                            camera_world_xyz[0] - gizmo_origin_world_xyz[0],
+                            camera_world_xyz[1] - gizmo_origin_world_xyz[1],
+                            camera_world_xyz[2] - gizmo_origin_world_xyz[2],
+                        };
+                        normalize3(view_to_camera);
+                        for (int i = 0; i < count; ++i) {
+                            float t = (float)i / (float)count;
+                            float a = t * 6.28318530718f;
+                            float ca = std::cos(a);
+                            float sa = std::sin(a);
+                            float n[3] = {0.0f, 0.0f, 0.0f};
+                            // Ring local point direction in world-space (world axes gizmo).
+                            if (ring_axis == 0) { // around X => YZ plane
+                                n[1] = ca;
+                                n[2] = sa;
+                            } else if (ring_axis == 1) { // around Y => XZ plane
+                                n[0] = ca;
+                                n[2] = sa;
+                            } else { // around Z => XY plane
+                                n[0] = ca;
+                                n[1] = sa;
+                            }
+                            float d = n[0] * view_to_camera[0] + n[1] * view_to_camera[1] + n[2] * view_to_camera[2];
+                            mask[(size_t)i] = (d >= 0.0f) ? 1 : 0;
+                        }
+                        return mask;
+                    };
+                    auto ring_distance_clipped = [&](ImVec2 p, const std::vector<ImVec2>& pts, const std::vector<uint8_t>& front, float inner_r) -> float {
+                        if (pts.size() < 2) {
+                            return FLT_MAX;
+                        }
+                        float inner_r2 = inner_r * inner_r;
+                        float best = FLT_MAX;
+                        for (size_t i = 0; i < pts.size(); ++i) {
+                            size_t j = (i + 1) % pts.size();
+                            const ImVec2& a = pts[i];
+                            const ImVec2& b = pts[j];
+                            ImVec2 da = vsub(a, center);
+                            ImVec2 db = vsub(b, center);
+                            bool va = (da.x * da.x + da.y * da.y) >= inner_r2;
+                            bool vb = (db.x * db.x + db.y * db.y) >= inner_r2;
+                            bool fa = front.empty() ? true : front[i] != 0;
+                            bool fb = front.empty() ? true : front[j] != 0;
+                            if (!(va && vb && (fa || fb))) {
+                                continue;
+                            }
+                            best = std::min(best, distance_to_segment(p, a, b));
+                        }
+                        return best;
+                    };
+                    auto draw_ring_clipped = [&](const std::vector<ImVec2>& pts, const std::vector<uint8_t>& front, float inner_r, ImU32 color, float thick) {
+                        if (pts.size() < 2) {
+                            return;
+                        }
+                        float inner_r2 = inner_r * inner_r;
+                        for (size_t i = 0; i < pts.size(); ++i) {
+                            size_t j = (i + 1) % pts.size();
+                            const ImVec2& a = pts[i];
+                            const ImVec2& b = pts[j];
+                            ImVec2 da = vsub(a, center);
+                            ImVec2 db = vsub(b, center);
+                            bool va = (da.x * da.x + da.y * da.y) >= inner_r2;
+                            bool vb = (db.x * db.x + db.y * db.y) >= inner_r2;
+                            bool fa = front.empty() ? true : front[i] != 0;
+                            bool fb = front.empty() ? true : front[j] != 0;
+                            if (!(va && vb && (fa || fb))) {
+                                continue;
+                            }
+                            draw->AddLine(a, b, color, thick);
+                        }
+                    };
+
+                    ImVec2 mouse = ImGui::GetIO().MousePos;
+                    ImVec2 vx = has_x ? vsub(x_end, center) : ImVec2(0, 0);
+                    ImVec2 vy = has_y ? vsub(y_end, center) : ImVec2(0, 0);
+                    ImVec2 vz = has_z ? vsub(z_end, center) : ImVec2(0, 0);
+                    ImVec2 ux = vnorm(vx);
+                    ImVec2 uy = vnorm(vy);
+                    ImVec2 uz = vnorm(vz);
+                    float len_x = has_x ? vlen(vx) : 0.0f;
+                    float len_y = has_y ? vlen(vy) : 0.0f;
+                    float len_z = has_z ? vlen(vz) : 0.0f;
+                    float axis_ref_len = std::max(1.0f, std::max(len_x, std::max(len_y, len_z)));
+                    ImVec2 ex = x_end;
+                    ImVec2 ey = y_end;
+                    ImVec2 ez = z_end;
+                    auto fade_from_ratio = [](float ratio) -> float {
+                        // 20% -> 100% visible, 10% -> 0% visible, below 10% stays hidden.
+                        const float visible_start = 0.20f;
+                        const float hidden_end = 0.10f;
+                        if (ratio <= hidden_end) return 0.0f;
+                        if (ratio >= visible_start) return 1.0f;
+                        return (ratio - hidden_end) / (visible_start - hidden_end);
+                    };
+                    auto axis_visibility = [&](float len) -> float {
+                        float r = (axis_ref_len > 1e-5f) ? (len / axis_ref_len) : 0.0f;
+                        return fade_from_ratio(r);
+                    };
+                    auto alpha_color = [](ImU32 color, float alpha_scale) -> ImU32 {
+                        ImVec4 c = ImGui::ColorConvertU32ToFloat4(color);
+                        c.w *= alpha_scale;
+                        return ImGui::GetColorU32(c);
+                    };
+                    float vis_x = axis_visibility(len_x);
+                    float vis_y = axis_visibility(len_y);
+                    float vis_z = axis_visibility(len_z);
+                    float vis_xy = std::min(vis_x, vis_y);
+                    float vis_xz = std::min(vis_x, vis_z);
+                    float vis_yz = std::min(vis_y, vis_z);
+
+                    int mode = *transform_tool_mode;
+                    int hover_handle = 0;
+                    float best_dist = 10.0f;
+                    const float pick_visibility_threshold = 0.2f;
+                    float plane_in = 0.22f;
+                    float plane_out = 0.38f;
+                    // Inner arcball/clip sphere: just inside the colored ring radius (~0.9).
+                    float rotate_inner_clip_r = axis_ref_len * 0.86f;
+                    int active = *gizmo_active_axis;
+
+                    // Freeze hover feedback once a gizmo handle is active.
+                    if (active == 0) {
+                        // Axis handles.
+                        if (has_x && vis_x >= pick_visibility_threshold) {
+                            float d = distance_to_segment(mouse, center, ex);
+                            if (d < best_dist) { best_dist = d; hover_handle = (mode == 1) ? 1 : (mode == 2) ? 11 : 21; }
+                        }
+                        if (has_y && vis_y >= pick_visibility_threshold) {
+                            float d = distance_to_segment(mouse, center, ey);
+                            if (d < best_dist) { best_dist = d; hover_handle = (mode == 1) ? 2 : (mode == 2) ? 12 : 22; }
+                        }
+                        if (has_z && vis_z >= pick_visibility_threshold) {
+                            float d = distance_to_segment(mouse, center, ez);
+                            if (d < best_dist) { best_dist = d; hover_handle = (mode == 1) ? 3 : (mode == 2) ? 13 : 23; }
+                        }
+
+                        // Plane handles for translate/scale.
+                        if (mode == 1 || mode == 3) {
+                            if (has_x && has_y && vis_xy >= pick_visibility_threshold) {
+                                ImVec2 a = vadd(center, vadd(vmul(vx, plane_in), vmul(vy, plane_in)));
+                                ImVec2 b = vadd(center, vadd(vmul(vx, plane_out), vmul(vy, plane_in)));
+                                ImVec2 c = vadd(center, vadd(vmul(vx, plane_out), vmul(vy, plane_out)));
+                                ImVec2 d = vadd(center, vadd(vmul(vx, plane_in), vmul(vy, plane_out)));
+                                if (point_in_quad(mouse, a, b, c, d)) hover_handle = (mode == 1) ? 4 : 24;
+                            }
+                            if (has_x && has_z && vis_xz >= pick_visibility_threshold) {
+                                ImVec2 a = vadd(center, vadd(vmul(vx, plane_in), vmul(vz, plane_in)));
+                                ImVec2 b = vadd(center, vadd(vmul(vx, plane_out), vmul(vz, plane_in)));
+                                ImVec2 c = vadd(center, vadd(vmul(vx, plane_out), vmul(vz, plane_out)));
+                                ImVec2 d = vadd(center, vadd(vmul(vx, plane_in), vmul(vz, plane_out)));
+                                if (point_in_quad(mouse, a, b, c, d)) hover_handle = (mode == 1) ? 5 : 25;
+                            }
+                            if (has_y && has_z && vis_yz >= pick_visibility_threshold) {
+                                ImVec2 a = vadd(center, vadd(vmul(vy, plane_in), vmul(vz, plane_in)));
+                                ImVec2 b = vadd(center, vadd(vmul(vy, plane_out), vmul(vz, plane_in)));
+                                ImVec2 c = vadd(center, vadd(vmul(vy, plane_out), vmul(vz, plane_out)));
+                                ImVec2 d = vadd(center, vadd(vmul(vy, plane_in), vmul(vz, plane_out)));
+                                if (point_in_quad(mouse, a, b, c, d)) hover_handle = (mode == 1) ? 6 : 26;
+                            }
+                        }
+
+                        if (mode == 2) {
+                            float ring_pick_thresh = 8.0f;
+                            std::vector<ImVec2> ring_x = ring_points(vy, vz, 0.9f);
+                            std::vector<ImVec2> ring_y = ring_points(vx, vz, 0.9f);
+                            std::vector<ImVec2> ring_z = ring_points(vx, vy, 0.9f);
+                            std::vector<uint8_t> front_x = ring_front_mask(0, (int)ring_x.size());
+                            std::vector<uint8_t> front_y = ring_front_mask(1, (int)ring_y.size());
+                            std::vector<uint8_t> front_z = ring_front_mask(2, (int)ring_z.size());
+                            float dx = ring_distance_clipped(mouse, ring_x, front_x, rotate_inner_clip_r);
+                            float dy = ring_distance_clipped(mouse, ring_y, front_y, rotate_inner_clip_r);
+                            float dz = ring_distance_clipped(mouse, ring_z, front_z, rotate_inner_clip_r);
+                            if (vis_x >= pick_visibility_threshold && dx < best_dist && dx < ring_pick_thresh) { best_dist = dx; hover_handle = 11; }
+                            if (vis_y >= pick_visibility_threshold && dy < best_dist && dy < ring_pick_thresh) { best_dist = dy; hover_handle = 12; }
+                            if (vis_z >= pick_visibility_threshold && dz < best_dist && dz < ring_pick_thresh) { best_dist = dz; hover_handle = 13; }
+                            float white_r = axis_ref_len * 1.05f;
+                            float d = std::abs(vlen(vsub(mouse, center)) - white_r);
+                            if (d < best_dist && d < 9.0f) { hover_handle = 14; }
+                            float d_inner = vlen(vsub(mouse, center));
+                            if (d_inner <= rotate_inner_clip_r && hover_handle == 0) {
+                                hover_handle = 15;
+                            }
+                        }
+                        if (mode == 3) {
+                            float uniform_r = axis_ref_len * 1.25f;
+                            float d = std::abs(vlen(vsub(mouse, center)) - uniform_r);
+                            if (d < best_dist && d < 9.0f) { hover_handle = 27; }
+                        }
+                    }
+
+                    if (*gizmo_active_axis == 0 && hover_handle != 0 && ImGui::IsMouseClicked(0)) {
+                        *gizmo_active_axis = hover_handle;
+                    }
+
+                    auto active_or_hover = [&](int id) -> bool { return active == id || hover_handle == id; };
+                    float draw_vis_x = (active == 1 || active == 11 || active == 21) ? 1.0f : vis_x;
+                    float draw_vis_y = (active == 2 || active == 12 || active == 22) ? 1.0f : vis_y;
+                    float draw_vis_z = (active == 3 || active == 13 || active == 23) ? 1.0f : vis_z;
+                    ImU32 c_x = alpha_color(
+                        active_or_hover((mode == 2) ? 11 : (mode == 3) ? 21 : 1) ? IM_COL32(255, 220, 220, 255) : IM_COL32(230, 80, 80, 255),
+                        draw_vis_x
+                    );
+                    ImU32 c_y = alpha_color(
+                        active_or_hover((mode == 2) ? 12 : (mode == 3) ? 22 : 2) ? IM_COL32(220, 255, 220, 255) : IM_COL32(80, 230, 80, 255),
+                        draw_vis_y
+                    );
+                    ImU32 c_z = alpha_color(
+                        active_or_hover((mode == 2) ? 13 : (mode == 3) ? 23 : 3) ? IM_COL32(220, 220, 255, 255) : IM_COL32(80, 140, 255, 255),
+                        draw_vis_z
+                    );
+                    float thickness = (*gizmo_active_axis != 0) ? 4.0f : 3.0f;
+
+                    draw->AddCircleFilled(center, 4.0f, IM_COL32(255, 255, 255, 220));
+                    if (mode == 1) {
+                        if (has_x) draw_arrow(center, ex, c_x, thickness);
+                        if (has_y) draw_arrow(center, ey, c_y, thickness);
+                        if (has_z) draw_arrow(center, ez, c_z, thickness);
+                    } else if (mode == 3) {
+                        if (has_x) draw_square_head(center, ex, c_x, thickness);
+                        if (has_y) draw_square_head(center, ey, c_y, thickness);
+                        if (has_z) draw_square_head(center, ez, c_z, thickness);
+                    } else if (mode != 2) {
+                        if (has_x) draw->AddLine(center, ex, c_x, thickness);
+                        if (has_y) draw->AddLine(center, ey, c_y, thickness);
+                        if (has_z) draw->AddLine(center, ez, c_z, thickness);
+                    }
+
+                    if (mode == 1 || mode == 3) {
+                        if (has_x && has_y) {
+                            ImVec2 a = vadd(center, vadd(vmul(vx, plane_in), vmul(vy, plane_in)));
+                            ImVec2 b = vadd(center, vadd(vmul(vx, plane_out), vmul(vy, plane_in)));
+                            ImVec2 c = vadd(center, vadd(vmul(vx, plane_out), vmul(vy, plane_out)));
+                            ImVec2 d = vadd(center, vadd(vmul(vx, plane_in), vmul(vy, plane_out)));
+                            float pv = (active == ((mode == 1) ? 4 : 24)) ? 1.0f : vis_xy;
+                            ImU32 cc = alpha_color(
+                                active_or_hover((mode == 1) ? 4 : 24) ? IM_COL32(255, 230, 110, 165) : IM_COL32(255, 230, 110, 90),
+                                pv
+                            );
+                            draw->AddQuadFilled(a, b, c, d, cc);
+                        }
+                        if (has_x && has_z) {
+                            ImVec2 a = vadd(center, vadd(vmul(vx, plane_in), vmul(vz, plane_in)));
+                            ImVec2 b = vadd(center, vadd(vmul(vx, plane_out), vmul(vz, plane_in)));
+                            ImVec2 c = vadd(center, vadd(vmul(vx, plane_out), vmul(vz, plane_out)));
+                            ImVec2 d = vadd(center, vadd(vmul(vx, plane_in), vmul(vz, plane_out)));
+                            float pv = (active == ((mode == 1) ? 5 : 25)) ? 1.0f : vis_xz;
+                            ImU32 cc = alpha_color(
+                                active_or_hover((mode == 1) ? 5 : 25) ? IM_COL32(255, 230, 110, 165) : IM_COL32(255, 230, 110, 90),
+                                pv
+                            );
+                            draw->AddQuadFilled(a, b, c, d, cc);
+                        }
+                        if (has_y && has_z) {
+                            ImVec2 a = vadd(center, vadd(vmul(vy, plane_in), vmul(vz, plane_in)));
+                            ImVec2 b = vadd(center, vadd(vmul(vy, plane_out), vmul(vz, plane_in)));
+                            ImVec2 c = vadd(center, vadd(vmul(vy, plane_out), vmul(vz, plane_out)));
+                            ImVec2 d = vadd(center, vadd(vmul(vy, plane_in), vmul(vz, plane_out)));
+                            float pv = (active == ((mode == 1) ? 6 : 26)) ? 1.0f : vis_yz;
+                            ImU32 cc = alpha_color(
+                                active_or_hover((mode == 1) ? 6 : 26) ? IM_COL32(255, 230, 110, 165) : IM_COL32(255, 230, 110, 90),
+                                pv
+                            );
+                            draw->AddQuadFilled(a, b, c, d, cc);
+                        }
+                    }
+
+                    if (mode == 2) {
+                        float inner_alpha = active_or_hover(15) ? 0.20f : 0.12f;
+                        ImU32 inner_color = alpha_color(IM_COL32(255, 255, 255, 255), inner_alpha);
+                        draw->AddCircleFilled(center, rotate_inner_clip_r, inner_color, 48);
+                        std::vector<ImVec2> ring_x = ring_points(vy, vz, 0.9f);
+                        std::vector<ImVec2> ring_y = ring_points(vx, vz, 0.9f);
+                        std::vector<ImVec2> ring_z = ring_points(vx, vy, 0.9f);
+                        std::vector<uint8_t> front_x = ring_front_mask(0, (int)ring_x.size());
+                        std::vector<uint8_t> front_y = ring_front_mask(1, (int)ring_y.size());
+                        std::vector<uint8_t> front_z = ring_front_mask(2, (int)ring_z.size());
+                        draw_ring_clipped(
+                            ring_x,
+                            front_x,
+                            rotate_inner_clip_r,
+                            alpha_color(active_or_hover(11) ? IM_COL32(255, 220, 220, 255) : IM_COL32(230, 80, 80, 220), draw_vis_x),
+                            thickness
+                        );
+                        draw_ring_clipped(
+                            ring_y,
+                            front_y,
+                            rotate_inner_clip_r,
+                            alpha_color(active_or_hover(12) ? IM_COL32(220, 255, 220, 255) : IM_COL32(80, 230, 80, 220), draw_vis_y),
+                            thickness
+                        );
+                        draw_ring_clipped(
+                            ring_z,
+                            front_z,
+                            rotate_inner_clip_r,
+                            alpha_color(active_or_hover(13) ? IM_COL32(220, 220, 255, 255) : IM_COL32(80, 140, 255, 220), draw_vis_z),
+                            thickness
+                        );
+                        float white_r = axis_ref_len * 1.05f;
+                        ImU32 wc = active_or_hover(14) ? IM_COL32(255, 255, 255, 255) : IM_COL32(240, 240, 240, 200);
+                        draw->AddCircle(center, white_r, wc, 64, 2.5f);
+                    }
+
+                    if (mode == 3) {
+                        float uniform_r = axis_ref_len * 1.25f;
+                        ImU32 wc = active_or_hover(27) ? IM_COL32(255, 255, 255, 255) : IM_COL32(240, 240, 240, 200);
+                        draw->AddCircle(center, uniform_r, wc, 64, 2.5f);
+                    }
+                }
+            } else {
+                *gizmo_active_axis = 0;
             }
         }
 

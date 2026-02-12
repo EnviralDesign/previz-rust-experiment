@@ -44,6 +44,14 @@ pub enum MediaSourceKind {
     Video,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TextureColorSpace {
+    #[serde(rename = "srgb")]
+    Srgb,
+    #[serde(rename = "linear")]
+    Linear,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MaterialTextureBindingData {
     pub texture_param: String,
@@ -57,6 +65,14 @@ pub struct MaterialTextureBindingData {
     pub wrap_repeat_u: bool,
     #[serde(default = "default_true")]
     pub wrap_repeat_v: bool,
+    #[serde(default = "default_texture_color_space")]
+    pub color_space: TextureColorSpace,
+    #[serde(default)]
+    pub uv_offset: [f32; 2],
+    #[serde(default = "default_uv_scale")]
+    pub uv_scale: [f32; 2],
+    #[serde(default)]
+    pub uv_rotation_deg: f32,
 }
 
 /// Maps a material identity to user-authored override values.
@@ -107,6 +123,14 @@ fn default_next_object_id() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_texture_color_space() -> TextureColorSpace {
+    TextureColorSpace::Srgb
+}
+
+fn default_uv_scale() -> [f32; 2] {
+    [1.0, 1.0]
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -297,6 +321,19 @@ impl SceneState {
                 });
             }
         }
+    }
+
+    pub fn remove_object(&mut self, index: usize) -> Option<SceneObject> {
+        if index >= self.objects.len() {
+            return None;
+        }
+        let removed = self.objects.remove(index);
+        let removed_id = removed.id;
+        self.material_overrides
+            .retain(|entry| entry.object_id != Some(removed_id));
+        self.texture_bindings
+            .retain(|entry| entry.object_id != removed_id);
+        Some(removed)
     }
 
     #[cfg(test)]

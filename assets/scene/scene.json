@@ -7,14 +7,14 @@
         "Asset": {
           "path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
           "position": [
-            0.1,
-            -0.5,
-            0.5
+            0.0,
+            0.0,
+            0.0
           ],
           "rotation_deg": [
             0.0,
-            25.0,
-            30.0
+            0.0,
+            0.0
           ],
           "scale": [
             1.0,
@@ -32,9 +32,9 @@
           "color": [
             1.0,
             1.0,
-            0.0
+            1.0
           ],
-          "intensity": 199111.1,
+          "intensity": 100000.0,
           "direction": [
             0.0,
             -1.0,
@@ -49,101 +49,14 @@
       "kind": {
         "Environment": {
           "hdr_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace.hdr",
-          "ibl_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace_ibl.ktx",
-          "skybox_path": "C:\\repos\\previz-rust-experiment\\assets\\environments\\AdamsPlace\\AdamsPlace_skybox.ktx",
-          "intensity": 85111.1
-        }
-      }
-    },
-    {
-      "id": 4,
-      "name": "DamagedHelmet.gltf",
-      "kind": {
-        "Asset": {
-          "path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
-          "position": [
-            0.0,
-            0.5,
-            0.0
-          ],
-          "rotation_deg": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "scale": [
-            1.0,
-            1.0,
-            1.0
-          ]
+          "ibl_path": "assets\\cache\\environments\\94ba9b03358e498476a30a16d8749a83e524322cecf7550732c44bf4d8f5638b\\94ba9b03358e498476a30a16d8749a83e524322cecf7550732c44bf4d8f5638b_ibl.ktx",
+          "skybox_path": "assets\\cache\\environments\\94ba9b03358e498476a30a16d8749a83e524322cecf7550732c44bf4d8f5638b\\94ba9b03358e498476a30a16d8749a83e524322cecf7550732c44bf4d8f5638b_skybox.ktx",
+          "intensity": 30000.0
         }
       }
     }
   ],
-  "material_overrides": [
-    {
-      "object_id": null,
-      "asset_path": null,
-      "material_slot": null,
-      "material_name": "Material_MR",
-      "data": {
-        "base_color_rgba": [
-          1.0,
-          0.0,
-          0.0,
-          1.0
-        ],
-        "metallic": 1.0,
-        "roughness": 1.0,
-        "emissive_rgb": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "object_id": null,
-      "asset_path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
-      "material_slot": 0,
-      "material_name": "Material_MR",
-      "data": {
-        "base_color_rgba": [
-          1.0,
-          0.0,
-          0.0,
-          1.0
-        ],
-        "metallic": 1.0,
-        "roughness": 1.0,
-        "emissive_rgb": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "object_id": 1,
-      "asset_path": "C:\\repos\\previz-rust-experiment\\assets\\gltf\\DamagedHelmet.gltf",
-      "material_slot": 0,
-      "material_name": "Material_MR",
-      "data": {
-        "base_color_rgba": [
-          0.0,
-          0.08823538,
-          1.0,
-          1.0
-        ],
-        "metallic": 1.0,
-        "roughness": 1.0,
-        "emissive_rgb": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    }
-  ],
-  "next_object_id": 5
+  "material_overrides": [],
+  "texture_bindings": [],
+  "next_object_id": 4
 }

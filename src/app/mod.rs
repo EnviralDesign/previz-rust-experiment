@@ -7,9 +7,10 @@ use crate::render::{CameraController, CameraMovement, RenderContext, RenderError
 use crate::scene::{
     compose_transform_matrix, DirectionalLightData, EnvironmentData, MaterialOverrideData,
     MaterialTextureBindingData, MediaSourceKind, RuntimeObject, SceneObjectKind, SceneRuntime,
-    SceneState,
+    SceneState, TextureColorSpace,
 };
-use crate::ui::{MaterialParams, UiState};
+use crate::ui::{MaterialParams, UiState, MATERIAL_TEXTURE_PARAMS};
+use glam::{EulerRot, Mat3, Vec2, Vec3};
 use input::InputState;
 use sha2::{Digest, Sha256};
 use timing::FrameTiming;
@@ -59,6 +60,9 @@ enum SceneCommand {
         rotation_deg: [f32; 3],
         scale: [f32; 3],
     },
+    DeleteObject {
+        index: usize,
+    },
     SaveScene { path: PathBuf },
     LoadScene { path: PathBuf },
 }
@@ -75,6 +79,52 @@ enum CameraControlProfile {
     Blender,
     #[allow(dead_code)]
     FpsLike,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransformToolMode {
+    Select = 0,
+    Translate = 1,
+    Rotate = 2,
+    Scale = 3,
+}
+
+const GIZMO_NONE: i32 = 0;
+const GIZMO_TRANSLATE_X: i32 = 1;
+const GIZMO_TRANSLATE_Y: i32 = 2;
+const GIZMO_TRANSLATE_Z: i32 = 3;
+const GIZMO_TRANSLATE_XY: i32 = 4;
+const GIZMO_TRANSLATE_XZ: i32 = 5;
+const GIZMO_TRANSLATE_YZ: i32 = 6;
+const GIZMO_ROTATE_X: i32 = 11;
+const GIZMO_ROTATE_Y: i32 = 12;
+const GIZMO_ROTATE_Z: i32 = 13;
+const GIZMO_ROTATE_VIEW: i32 = 14;
+const GIZMO_ROTATE_ARCBALL: i32 = 15;
+const GIZMO_SCALE_X: i32 = 21;
+const GIZMO_SCALE_Y: i32 = 22;
+const GIZMO_SCALE_Z: i32 = 23;
+const GIZMO_SCALE_XY: i32 = 24;
+const GIZMO_SCALE_XZ: i32 = 25;
+const GIZMO_SCALE_YZ: i32 = 26;
+const GIZMO_SCALE_UNIFORM: i32 = 27;
+
+#[derive(Debug, Clone, Copy)]
+struct GizmoDragState {
+    mode: TransformToolMode,
+    handle: i32,
+    gizmo_origin: [f32; 3],
+    start_position: [f32; 3],
+    start_rotation_deg: [f32; 3],
+    start_scale: [f32; 3],
+    start_axis_param: f32,
+    start_hit_world: [f32; 3],
+    drag_plane_normal: [f32; 3],
+    uniform_scale_start_radius: f32,
+    axis_world_length: f32,
+    arcball_center_screen: [f32; 2],
+    arcball_radius_px: f32,
+    arcball_last_vec_camera: [f32; 3],
 }
 
 enum CommandSeverity {
@@ -129,8 +179,13 @@ pub struct App {
     modifiers: Modifiers,
     mouse_pos: Option<(f32, f32)>,
     mouse_buttons: [bool; 5],
+    pending_click_select: bool,
     camera_drag_mode: Option<CameraDragMode>,
     camera_control_profile: CameraControlProfile,
+    transform_tool_mode: TransformToolMode,
+    gizmo_active_axis: i32,
+    gizmo_drag_state: Option<GizmoDragState>,
+    delete_selection_requested: bool,
     orbit_pivot: [f32; 3],
     window_focused: bool,
     camera: CameraController,
@@ -165,8 +220,13 @@ impl App {
             modifiers: Modifiers::default(),
             mouse_pos: None,
             mouse_buttons: [false; 5],
+            pending_click_select: false,
             camera_drag_mode: None,
             camera_control_profile: CameraControlProfile::Blender,
+            transform_tool_mode: TransformToolMode::Translate,
+            gizmo_active_axis: 0,
+            gizmo_drag_state: None,
+            delete_selection_requested: false,
             orbit_pivot: [0.0, 0.0, 0.0],
             window_focused: true,
             camera: CameraController::new([0.0, 0.0, 3.0], 0.6, 0.3),
@@ -210,6 +270,27 @@ impl App {
         }
         self.target_frame_duration = target;
         self.next_frame_time = Instant::now() + self.target_frame_duration;
+    }
+
+    fn mouse_over_sidebar_ui(&self) -> bool {
+        let Some((mx, my)) = self.mouse_pos else {
+            return false;
+        };
+        let Some(window) = self.window.as_ref() else {
+            return false;
+        };
+        let size = window.inner_size();
+        let width = size.width as f32;
+        let height = size.height as f32;
+        if mx < 0.0 || my < 0.0 || mx > width || my > height {
+            return false;
+        }
+
+        // Keep in sync with side-pane layout in build_support/bindings.cpp.
+        let left_width = width * 0.22;
+        let right_width = width * 0.30;
+        let gutter = 12.0;
+        mx <= left_width || mx >= (width - right_width - gutter)
     }
 
     fn update_camera(&mut self) {
@@ -304,6 +385,481 @@ impl App {
         true
     }
 
+    fn selected_asset_transform(&self) -> Option<(usize, [f32; 3], [f32; 3], [f32; 3])> {
+        let selected = self.current_selection_index()?;
+        let object = self.scene.objects().get(selected)?;
+        match &object.kind {
+            SceneObjectKind::Asset(data) => {
+                Some((selected, data.position, data.rotation_deg, data.scale))
+            }
+            _ => None,
+        }
+    }
+
+    fn axis_unit(axis: i32) -> [f32; 3] {
+        match axis {
+            1 => [1.0, 0.0, 0.0],
+            2 => [0.0, 1.0, 0.0],
+            3 => [0.0, 0.0, 1.0],
+            _ => [0.0, 0.0, 0.0],
+        }
+    }
+
+    fn gizmo_axis_from_handle(handle: i32) -> Option<i32> {
+        match handle {
+            GIZMO_TRANSLATE_X | GIZMO_ROTATE_X | GIZMO_SCALE_X => Some(1),
+            GIZMO_TRANSLATE_Y | GIZMO_ROTATE_Y | GIZMO_SCALE_Y => Some(2),
+            GIZMO_TRANSLATE_Z | GIZMO_ROTATE_Z | GIZMO_SCALE_Z => Some(3),
+            _ => None,
+        }
+    }
+
+    fn gizmo_plane_normal_from_handle(handle: i32) -> Option<[f32; 3]> {
+        match handle {
+            GIZMO_TRANSLATE_XY | GIZMO_SCALE_XY => Some([0.0, 0.0, 1.0]),
+            GIZMO_TRANSLATE_XZ | GIZMO_SCALE_XZ => Some([0.0, 1.0, 0.0]),
+            GIZMO_TRANSLATE_YZ | GIZMO_SCALE_YZ => Some([1.0, 0.0, 0.0]),
+            _ => None,
+        }
+    }
+
+    fn gizmo_plane_axes_from_handle(handle: i32) -> Option<([f32; 3], [f32; 3])> {
+        match handle {
+            GIZMO_TRANSLATE_XY | GIZMO_SCALE_XY => Some(([1.0, 0.0, 0.0], [0.0, 1.0, 0.0])),
+            GIZMO_TRANSLATE_XZ | GIZMO_SCALE_XZ => Some(([1.0, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            GIZMO_TRANSLATE_YZ | GIZMO_SCALE_YZ => Some(([0.0, 1.0, 0.0], [0.0, 0.0, 1.0])),
+            _ => None,
+        }
+    }
+
+    fn closest_axis_param_from_screen(
+        &self,
+        mouse: (f32, f32),
+        axis_origin: [f32; 3],
+        axis_unit: [f32; 3],
+    ) -> Option<f32> {
+        let (ray_origin, ray_dir) = self.viewport_ray(mouse.0, mouse.1)?;
+        closest_line_line_param(ray_origin, ray_dir, axis_origin, axis_unit)
+    }
+
+    fn ray_plane_hit(
+        &self,
+        mouse: (f32, f32),
+        plane_origin: [f32; 3],
+        plane_normal: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        let (ray_origin, ray_dir) = self.viewport_ray(mouse.0, mouse.1)?;
+        ray_plane_intersection(ray_origin, ray_dir, plane_origin, plane_normal)
+    }
+
+    fn gizmo_axis_world_length(&self, origin: [f32; 3]) -> f32 {
+        let to_camera = [
+            origin[0] - self.camera.position[0],
+            origin[1] - self.camera.position[1],
+            origin[2] - self.camera.position[2],
+        ];
+        let distance = (to_camera[0] * to_camera[0]
+            + to_camera[1] * to_camera[1]
+            + to_camera[2] * to_camera[2])
+            .sqrt()
+            .max(0.1);
+        (distance * 0.18).max(0.15)
+    }
+
+    fn apply_transform_tool_drag(&mut self, mouse: (f32, f32)) {
+        let Some(state_snapshot) = self.gizmo_drag_state else {
+            return;
+        };
+        let Some(index) = self.current_selection_index() else {
+            return;
+        };
+        let mut position = state_snapshot.start_position;
+        let mut rotation_deg = state_snapshot.start_rotation_deg;
+        let mut scale = state_snapshot.start_scale;
+
+        match state_snapshot.mode {
+            TransformToolMode::Select => return,
+            TransformToolMode::Translate => {
+                if let Some(axis) = Self::gizmo_axis_from_handle(state_snapshot.handle) {
+                    let axis_unit = Self::axis_unit(axis);
+                    if let Some(t) =
+                        self.closest_axis_param_from_screen(mouse, state_snapshot.gizmo_origin, axis_unit)
+                    {
+                        let delta = t - state_snapshot.start_axis_param;
+                        position[0] += axis_unit[0] * delta;
+                        position[1] += axis_unit[1] * delta;
+                        position[2] += axis_unit[2] * delta;
+                    }
+                } else if let Some(hit) = self.ray_plane_hit(
+                    mouse,
+                    state_snapshot.gizmo_origin,
+                    state_snapshot.drag_plane_normal,
+                ) {
+                    let delta = [
+                        hit[0] - state_snapshot.start_hit_world[0],
+                        hit[1] - state_snapshot.start_hit_world[1],
+                        hit[2] - state_snapshot.start_hit_world[2],
+                    ];
+                    position[0] += delta[0];
+                    position[1] += delta[1];
+                    position[2] += delta[2];
+                }
+            }
+            TransformToolMode::Rotate => {
+                let mut axis = [0.0f32, 0.0, 0.0];
+                if state_snapshot.handle == GIZMO_ROTATE_ARCBALL {
+                    let cur_cam = map_arcball_vector(
+                        mouse,
+                        state_snapshot.arcball_center_screen,
+                        state_snapshot.arcball_radius_px,
+                    );
+                    let mut prev_cam = state_snapshot.arcball_last_vec_camera;
+                    if let Some(state_mut) = self.gizmo_drag_state.as_mut() {
+                        prev_cam = state_mut.arcball_last_vec_camera;
+                        state_mut.arcball_last_vec_camera = cur_cam;
+                    }
+                    let v0 = Vec3::from_array(prev_cam);
+                    let v1 = Vec3::from_array(cur_cam);
+                    let axis_cam = v0.cross(v1);
+                    let axis_len2 = axis_cam.length_squared();
+                    if axis_len2 <= 1e-10 {
+                        return;
+                    }
+                    let angle = axis_len2.sqrt().atan2(v0.dot(v1).clamp(-1.0, 1.0));
+                    let axis_world = self.camera_vec_to_world(axis_cam.to_array());
+                    let axis_world_v = Vec3::from_array(axis_world).normalize_or_zero();
+                    if axis_world_v.length_squared() <= 1e-10 {
+                        return;
+                    }
+                    if let Some(object) = self.scene.objects().get(index) {
+                        if let SceneObjectKind::Asset(data) = &object.kind {
+                            rotation_deg = data.rotation_deg;
+                        }
+                    }
+                    let start_mat = euler_deg_to_mat3(rotation_deg);
+                    let delta_mat = Mat3::from_axis_angle(axis_world_v, angle);
+                    let out_mat = delta_mat * start_mat;
+                    rotation_deg = mat3_to_euler_deg(out_mat);
+                    let result = self.execute_scene_command(SceneCommand::TransformNode {
+                        index,
+                        position,
+                        rotation_deg,
+                        scale,
+                    });
+                    self.apply_command_feedback("Failed to transform via tool drag", result);
+                    return;
+                } else if state_snapshot.handle == GIZMO_ROTATE_VIEW {
+                    let (forward, _, _) = self.camera.basis();
+                    axis = forward;
+                } else if let Some(axis_id) = Self::gizmo_axis_from_handle(state_snapshot.handle) {
+                    axis = Self::axis_unit(axis_id);
+                }
+                if axis == [0.0, 0.0, 0.0] {
+                    return;
+                }
+                let Some(hit) = self.ray_plane_hit(mouse, state_snapshot.gizmo_origin, axis) else {
+                    return;
+                };
+                let start_vec = Vec3::from_array(state_snapshot.start_hit_world) - Vec3::from_array(state_snapshot.gizmo_origin);
+                let cur_vec = Vec3::from_array(hit) - Vec3::from_array(state_snapshot.gizmo_origin);
+                if start_vec.length_squared() <= 1e-10 || cur_vec.length_squared() <= 1e-10 {
+                    return;
+                }
+                let v0 = start_vec.normalize();
+                let v1 = cur_vec.normalize();
+                let n = Vec3::from_array(axis).normalize_or_zero();
+                if n.length_squared() <= 1e-10 {
+                    return;
+                }
+                let cross = v0.cross(v1);
+                let sin_v = n.dot(cross);
+                let cos_v = v0.dot(v1).clamp(-1.0, 1.0);
+                let angle = sin_v.atan2(cos_v);
+                let start_mat = euler_deg_to_mat3(state_snapshot.start_rotation_deg);
+                let delta_mat = Mat3::from_axis_angle(n, angle);
+                let out_mat = delta_mat * start_mat;
+                rotation_deg = mat3_to_euler_deg(out_mat);
+            }
+            TransformToolMode::Scale => {
+                if let Some(axis_id) = Self::gizmo_axis_from_handle(state_snapshot.handle) {
+                    let axis_unit = Self::axis_unit(axis_id);
+                    if let Some(t) =
+                        self.closest_axis_param_from_screen(mouse, state_snapshot.gizmo_origin, axis_unit)
+                    {
+                        let delta = t - state_snapshot.start_axis_param;
+                        let factor = (1.0 + (delta / state_snapshot.axis_world_length.max(0.001))).max(0.01);
+                        match axis_id {
+                            1 => scale[0] = state_snapshot.start_scale[0] * factor,
+                            2 => scale[1] = state_snapshot.start_scale[1] * factor,
+                            3 => scale[2] = state_snapshot.start_scale[2] * factor,
+                            _ => {}
+                        }
+                    }
+                } else if state_snapshot.handle == GIZMO_SCALE_UNIFORM {
+                    let Some(center_screen) = self.world_to_screen(state_snapshot.gizmo_origin) else {
+                        return;
+                    };
+                    let radius = Vec2::new(mouse.0 - center_screen[0], mouse.1 - center_screen[1]).length();
+                    if state_snapshot.uniform_scale_start_radius > 1e-4 && radius.is_finite() {
+                        let factor = (radius / state_snapshot.uniform_scale_start_radius).clamp(0.01, 100.0);
+                        scale = [
+                            state_snapshot.start_scale[0] * factor,
+                            state_snapshot.start_scale[1] * factor,
+                            state_snapshot.start_scale[2] * factor,
+                        ];
+                    }
+                } else if let Some((a_axis, b_axis)) = Self::gizmo_plane_axes_from_handle(state_snapshot.handle) {
+                    let Some(hit) = self.ray_plane_hit(
+                        mouse,
+                        state_snapshot.gizmo_origin,
+                        state_snapshot.drag_plane_normal,
+                    ) else {
+                        return;
+                    };
+                    let delta = [
+                        hit[0] - state_snapshot.start_hit_world[0],
+                        hit[1] - state_snapshot.start_hit_world[1],
+                        hit[2] - state_snapshot.start_hit_world[2],
+                    ];
+                    let da = dot3(delta, a_axis);
+                    let db = dot3(delta, b_axis);
+                    let fa = (1.0 + (da / state_snapshot.axis_world_length.max(0.001))).max(0.01);
+                    let fb = (1.0 + (db / state_snapshot.axis_world_length.max(0.001))).max(0.01);
+                    if a_axis[0] > 0.5 || b_axis[0] > 0.5 {
+                        scale[0] = state_snapshot.start_scale[0] * if a_axis[0] > 0.5 { fa } else { fb };
+                    }
+                    if a_axis[1] > 0.5 || b_axis[1] > 0.5 {
+                        scale[1] = state_snapshot.start_scale[1] * if a_axis[1] > 0.5 { fa } else { fb };
+                    }
+                    if a_axis[2] > 0.5 || b_axis[2] > 0.5 {
+                        scale[2] = state_snapshot.start_scale[2] * if a_axis[2] > 0.5 { fa } else { fb };
+                    }
+                }
+            }
+        }
+
+        let result = self.execute_scene_command(SceneCommand::TransformNode {
+            index,
+            position,
+            rotation_deg,
+            scale,
+        });
+        self.apply_command_feedback("Failed to transform via tool drag", result);
+    }
+
+    fn begin_gizmo_drag_if_needed(&mut self, mouse: (f32, f32)) {
+        if self.gizmo_drag_state.is_some() || self.gizmo_active_axis == GIZMO_NONE {
+            return;
+        }
+        let Some((_, start_position, start_rotation_deg, start_scale)) = self.selected_asset_transform()
+        else {
+            return;
+        };
+        let gizmo_origin = start_position;
+        let handle = self.gizmo_active_axis;
+        let mut start_axis_param = 0.0;
+        let mut drag_plane_normal = [0.0, 0.0, 0.0];
+        let mut start_hit_world = gizmo_origin;
+        let mut uniform_scale_start_radius = 1.0;
+        let mut arcball_center_screen = [mouse.0, mouse.1];
+        let mut arcball_radius_px = 64.0f32;
+        let mut arcball_last_vec_camera = [0.0, 0.0, 1.0];
+        let axis_world_length = self.gizmo_axis_world_length(gizmo_origin);
+
+        if let Some(axis) = Self::gizmo_axis_from_handle(handle) {
+            let axis_unit = Self::axis_unit(axis);
+            start_axis_param = self
+                .closest_axis_param_from_screen(mouse, gizmo_origin, axis_unit)
+                .unwrap_or(0.0);
+            if self.transform_tool_mode == TransformToolMode::Rotate {
+                drag_plane_normal = axis_unit;
+                if let Some(hit) = self.ray_plane_hit(mouse, gizmo_origin, drag_plane_normal) {
+                    start_hit_world = hit;
+                } else {
+                    start_hit_world = [
+                        gizmo_origin[0] + axis_unit[0] * axis_world_length,
+                        gizmo_origin[1] + axis_unit[1] * axis_world_length,
+                        gizmo_origin[2] + axis_unit[2] * axis_world_length,
+                    ];
+                }
+            }
+        } else if handle == GIZMO_ROTATE_VIEW {
+            let (forward, _, _) = self.camera.basis();
+            drag_plane_normal = forward;
+            if let Some(hit) = self.ray_plane_hit(mouse, gizmo_origin, drag_plane_normal) {
+                start_hit_world = hit;
+            }
+        } else if handle == GIZMO_ROTATE_ARCBALL {
+            if let Some(center_screen) = self.world_to_screen(gizmo_origin) {
+                arcball_center_screen = center_screen;
+            }
+            if let Some(reference) = self.gizmo_axis_screen_reference_len(gizmo_origin) {
+                arcball_radius_px = (reference * 0.86).max(20.0);
+            }
+            arcball_last_vec_camera =
+                map_arcball_vector(mouse, arcball_center_screen, arcball_radius_px);
+        } else if handle == GIZMO_SCALE_UNIFORM {
+            if let Some(center_screen) = self.world_to_screen(gizmo_origin) {
+                uniform_scale_start_radius =
+                    Vec2::new(mouse.0 - center_screen[0], mouse.1 - center_screen[1]).length();
+            }
+        } else if let Some(normal) = Self::gizmo_plane_normal_from_handle(handle) {
+            drag_plane_normal = normal;
+            if let Some(hit) = self.ray_plane_hit(mouse, gizmo_origin, drag_plane_normal) {
+                start_hit_world = hit;
+            }
+        }
+
+        self.gizmo_drag_state = Some(GizmoDragState {
+            mode: self.transform_tool_mode,
+            handle,
+            gizmo_origin,
+            start_position,
+            start_rotation_deg,
+            start_scale,
+            start_axis_param,
+            start_hit_world,
+            drag_plane_normal,
+            uniform_scale_start_radius,
+            axis_world_length,
+            arcball_center_screen,
+            arcball_radius_px,
+            arcball_last_vec_camera,
+        });
+    }
+
+    fn camera_vec_to_world(&self, v: [f32; 3]) -> [f32; 3] {
+        let (_, right, up) = self.camera.basis();
+        let (forward, _, _) = self.camera.basis();
+        [
+            right[0] * v[0] + up[0] * v[1] + forward[0] * v[2],
+            right[1] * v[0] + up[1] * v[1] + forward[1] * v[2],
+            right[2] * v[0] + up[2] * v[1] + forward[2] * v[2],
+        ]
+    }
+
+    fn gizmo_axis_screen_reference_len(&self, origin: [f32; 3]) -> Option<f32> {
+        let center = self.world_to_screen(origin)?;
+        let axis_world_len = self.gizmo_axis_world_length(origin);
+        let x = self.world_to_screen([origin[0] + axis_world_len, origin[1], origin[2]])?;
+        let y = self.world_to_screen([origin[0], origin[1] + axis_world_len, origin[2]])?;
+        let z = self.world_to_screen([origin[0], origin[1], origin[2] + axis_world_len])?;
+        let dx = ((x[0] - center[0]).powi(2) + (x[1] - center[1]).powi(2)).sqrt();
+        let dy = ((y[0] - center[0]).powi(2) + (y[1] - center[1]).powi(2)).sqrt();
+        let dz = ((z[0] - center[0]).powi(2) + (z[1] - center[1]).powi(2)).sqrt();
+        Some(dx.max(dy).max(dz).max(1.0))
+    }
+
+    fn viewport_ray(&self, screen_x: f32, screen_y: f32) -> Option<([f32; 3], [f32; 3])> {
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let width = size.width as f32;
+        let height = size.height as f32;
+        let ndc_x = (2.0 * screen_x / width) - 1.0;
+        let ndc_y = 1.0 - (2.0 * screen_y / height);
+        let aspect = width / height;
+        let tan_half_fov = (45.0f32.to_radians() * 0.5).tan();
+        let view_x = ndc_x * aspect * tan_half_fov;
+        let view_y = ndc_y * tan_half_fov;
+        let (forward, right, up) = self.camera.basis();
+        let mut dir = [
+            right[0] * view_x + up[0] * view_y + forward[0],
+            right[1] * view_x + up[1] * view_y + forward[1],
+            right[2] * view_x + up[2] * view_y + forward[2],
+        ];
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if len <= 1e-6 {
+            return None;
+        }
+        dir[0] /= len;
+        dir[1] /= len;
+        dir[2] /= len;
+        Some((self.camera.position, dir))
+    }
+
+    fn world_to_screen(&self, world: [f32; 3]) -> Option<[f32; 2]> {
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let width = size.width as f32;
+        let height = size.height as f32;
+        let aspect = width / height;
+        let tan_half_fov = (45.0f32.to_radians() * 0.5).tan();
+        let rel = [
+            world[0] - self.camera.position[0],
+            world[1] - self.camera.position[1],
+            world[2] - self.camera.position[2],
+        ];
+        let (forward, right, up) = self.camera.basis();
+        let view_x = rel[0] * right[0] + rel[1] * right[1] + rel[2] * right[2];
+        let view_y = rel[0] * up[0] + rel[1] * up[1] + rel[2] * up[2];
+        let view_z = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
+        if view_z <= 0.001 {
+            return None;
+        }
+        let ndc_x = view_x / (view_z * tan_half_fov * aspect);
+        let ndc_y = view_y / (view_z * tan_half_fov);
+        if !ndc_x.is_finite() || !ndc_y.is_finite() {
+            return None;
+        }
+        let screen_x = (ndc_x + 1.0) * 0.5 * width;
+        let screen_y = (1.0 - ndc_y) * 0.5 * height;
+        Some([screen_x, screen_y])
+    }
+
+    fn pick_scene_object(&self, screen_x: f32, screen_y: f32) -> Option<usize> {
+        let (ray_origin, ray_dir) = self.viewport_ray(screen_x, screen_y)?;
+        let mut best_hit: Option<(usize, f32)> = None;
+        for (index, object) in self.scene.objects().iter().enumerate() {
+            let t_hit = match &object.kind {
+                SceneObjectKind::Asset(data) => {
+                    let runtime = self.scene_runtime.get(index).copied().unwrap_or_default();
+                    let center = [
+                        data.position[0] + runtime.center[0] * data.scale[0],
+                        data.position[1] + runtime.center[1] * data.scale[1],
+                        data.position[2] + runtime.center[2] * data.scale[2],
+                    ];
+                    let extent = [
+                        runtime.extent[0] * data.scale[0].abs().max(0.001),
+                        runtime.extent[1] * data.scale[1].abs().max(0.001),
+                        runtime.extent[2] * data.scale[2].abs().max(0.001),
+                    ];
+                    let t_aabb = ray_intersect_aabb(ray_origin, ray_dir, center, extent);
+                    let radius = extent[0].max(extent[1]).max(extent[2]).max(0.1);
+                    let t_sphere = ray_intersect_sphere(ray_origin, ray_dir, center, radius);
+                    match (t_aabb, t_sphere) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    }
+                }
+                SceneObjectKind::DirectionalLight(_) => {
+                    ray_intersect_sphere(ray_origin, ray_dir, [0.0, 0.0, 0.0], 0.6)
+                }
+                SceneObjectKind::Environment(_) => {
+                    ray_intersect_sphere(ray_origin, ray_dir, self.orbit_pivot, 0.9)
+                }
+            };
+            let Some(t) = t_hit else {
+                continue;
+            };
+            if t < 0.0 {
+                continue;
+            }
+            match best_hit {
+                Some((_, best_t)) if t >= best_t => {}
+                _ => best_hit = Some((index, t)),
+            }
+        }
+        best_hit.map(|(index, _)| index)
+    }
+
     fn selection_to_ui_index(selection: Option<usize>) -> i32 {
         selection
             .and_then(|value| i32::try_from(value).ok())
@@ -387,6 +943,45 @@ impl App {
                 };
             }
         }
+        let mut gizmo_screen_points_xy = [f32::NAN; 8];
+        let mut gizmo_visible = false;
+        let mut gizmo_origin_world_xyz = [f32::NAN; 3];
+        let camera_world_xyz = self.camera.position;
+        if let Some(selected) = Self::normalize_selection(selected_index, self.scene.objects().len()) {
+            if let Some(object) = self.scene.objects().get(selected) {
+                let world = match &object.kind {
+                    SceneObjectKind::Asset(data) => data.position,
+                    SceneObjectKind::DirectionalLight(_) => [0.0, 0.0, 0.0],
+                    SceneObjectKind::Environment(_) => self.orbit_pivot,
+                };
+                gizmo_origin_world_xyz = world;
+                if let Some(center_screen) = self.world_to_screen(world) {
+                    gizmo_screen_points_xy[0] = center_screen[0];
+                    gizmo_screen_points_xy[1] = center_screen[1];
+                    let dx = world[0] - self.camera.position[0];
+                    let dy = world[1] - self.camera.position[1];
+                    let dz = world[2] - self.camera.position[2];
+                    let distance = (dx * dx + dy * dy + dz * dz).sqrt().max(0.1);
+                    let axis_world_len = (distance * 0.18).max(0.15);
+                    let x_world = [world[0] + axis_world_len, world[1], world[2]];
+                    let y_world = [world[0], world[1] + axis_world_len, world[2]];
+                    let z_world = [world[0], world[1], world[2] + axis_world_len];
+                    if let Some(p) = self.world_to_screen(x_world) {
+                        gizmo_screen_points_xy[2] = p[0];
+                        gizmo_screen_points_xy[3] = p[1];
+                    }
+                    if let Some(p) = self.world_to_screen(y_world) {
+                        gizmo_screen_points_xy[4] = p[0];
+                        gizmo_screen_points_xy[5] = p[1];
+                    }
+                    if let Some(p) = self.world_to_screen(z_world) {
+                        gizmo_screen_points_xy[6] = p[0];
+                        gizmo_screen_points_xy[7] = p[1];
+                    }
+                    gizmo_visible = true;
+                }
+            }
+        }
         let scoped_material_indices = scoped_material_indices_for_selection(
             &self.scene,
             &self.assets,
@@ -422,23 +1017,45 @@ impl App {
         let mut create_environment = false;
         let mut save_scene = false;
         let mut load_scene = false;
-        let mut material_pick_texture = false;
-        let mut material_apply_texture = false;
-        let (mut material_wrap_repeat_u, mut material_wrap_repeat_v) =
-            self.ui.material_wrap_repeat();
+        let mut transform_tool_mode = self.transform_tool_mode as i32;
+        let mut gizmo_active_axis = self.gizmo_active_axis;
+        let mut delete_selected = false;
+        let mut material_binding_pick_index = -1i32;
+        let mut material_binding_apply_index = -1i32;
+        let material_binding_param_names: Vec<CString> = MATERIAL_TEXTURE_PARAMS
+            .iter()
+            .map(|param| sanitize_cstring(param))
+            .collect();
+        let mut material_binding_sources =
+            vec![0u8; MATERIAL_TEXTURE_PARAMS.len() * 260];
+        let mut material_binding_wrap_repeat_u = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
+        let mut material_binding_wrap_repeat_v = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
+        let mut material_binding_srgb = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
+        let mut material_binding_uv_offset = vec![0.0f32; MATERIAL_TEXTURE_PARAMS.len() * 2];
+        let mut material_binding_uv_scale = vec![1.0f32; MATERIAL_TEXTURE_PARAMS.len() * 2];
+        let mut material_binding_uv_rotation_deg = vec![0.0f32; MATERIAL_TEXTURE_PARAMS.len()];
+        {
+            let rows = self.ui.material_binding_rows();
+            for (row_index, row) in rows.iter().enumerate() {
+                let start = row_index * 260;
+                let end = start + 260;
+                material_binding_sources[start..end].copy_from_slice(&row.source);
+                material_binding_wrap_repeat_u[row_index] = row.wrap_repeat_u;
+                material_binding_wrap_repeat_v[row_index] = row.wrap_repeat_v;
+                material_binding_srgb[row_index] = row.srgb;
+                material_binding_uv_offset[row_index * 2] = row.uv_offset[0];
+                material_binding_uv_offset[row_index * 2 + 1] = row.uv_offset[1];
+                material_binding_uv_scale[row_index * 2] = row.uv_scale[0];
+                material_binding_uv_scale[row_index * 2 + 1] = row.uv_scale[1];
+                material_binding_uv_rotation_deg[row_index] = row.uv_rotation_deg;
+            }
+        }
         let mut pending_transform_command: Option<SceneCommand> = None;
         let mut pending_update_light_command: Option<SceneCommand> = None;
         let mut pending_update_environment_command: Option<SceneCommand> = None;
         let mut pending_set_material_command: Option<SceneCommand> = None;
-        let (
-            material_texture_param_string,
-            material_texture_source_string,
-            mut hdr_path_string,
-            mut ibl_path_string,
-            mut skybox_path_string,
-        ) = {
-            let (material_texture_param, material_texture_source, hdr_path, ibl_path, skybox_path) =
-                self.ui.texture_and_environment_paths_mut();
+        let (mut hdr_path_string, mut ibl_path_string, mut skybox_path_string) = {
+            let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
                 let (mx, my) = if self.window_focused {
                     self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
@@ -468,12 +1085,17 @@ impl App {
                     &mut material_params.metallic,
                     &mut material_params.roughness,
                     &mut material_params.emissive_rgb,
-                    material_texture_param,
-                    material_texture_source,
-                    &mut material_wrap_repeat_u,
-                    &mut material_wrap_repeat_v,
-                    &mut material_pick_texture,
-                    &mut material_apply_texture,
+                    &material_binding_param_names,
+                    &mut material_binding_sources,
+                    260,
+                    &mut material_binding_wrap_repeat_u,
+                    &mut material_binding_wrap_repeat_v,
+                    &mut material_binding_srgb,
+                    &mut material_binding_uv_offset,
+                    &mut material_binding_uv_scale,
+                    &mut material_binding_uv_rotation_deg,
+                    &mut material_binding_pick_index,
+                    &mut material_binding_apply_index,
                     hdr_path,
                     ibl_path,
                     skybox_path,
@@ -488,13 +1110,18 @@ impl App {
                     &mut create_environment,
                     &mut save_scene,
                     &mut load_scene,
+                    &mut transform_tool_mode,
+                    &mut delete_selected,
+                    &gizmo_screen_points_xy,
+                    gizmo_visible,
+                    &gizmo_origin_world_xyz,
+                    &camera_world_xyz,
+                    &mut gizmo_active_axis,
                     self.timing.frame_dt,
                 );
                 self.timing.set_render_ms(render_ms);
             }
             (
-                buffer_to_string(material_texture_param),
-                buffer_to_string(material_texture_source),
                 buffer_to_string(hdr_path),
                 buffer_to_string(ibl_path),
                 buffer_to_string(skybox_path),
@@ -510,14 +1137,49 @@ impl App {
         self.ui
             .set_selected_material_index(selected_material_global_index);
         self.ui.set_material_params(material_params);
-        self.ui
-            .set_material_wrap_repeat(material_wrap_repeat_u, material_wrap_repeat_v);
+        {
+            let rows = self.ui.material_binding_rows_mut();
+            for (row_index, row) in rows.iter_mut().enumerate() {
+                let start = row_index * 260;
+                let end = start + 260;
+                row.source.copy_from_slice(&material_binding_sources[start..end]);
+                row.wrap_repeat_u = material_binding_wrap_repeat_u[row_index];
+                row.wrap_repeat_v = material_binding_wrap_repeat_v[row_index];
+                row.srgb = material_binding_srgb[row_index];
+                row.uv_offset = [
+                    material_binding_uv_offset[row_index * 2],
+                    material_binding_uv_offset[row_index * 2 + 1],
+                ];
+                row.uv_scale = [
+                    material_binding_uv_scale[row_index * 2],
+                    material_binding_uv_scale[row_index * 2 + 1],
+                ];
+                row.uv_rotation_deg = material_binding_uv_rotation_deg[row_index];
+            }
+        }
         self.ui.set_environment_intensity(environment_intensity);
+        self.transform_tool_mode = match transform_tool_mode {
+            0 => TransformToolMode::Select,
+            2 => TransformToolMode::Rotate,
+            3 => TransformToolMode::Scale,
+            _ => TransformToolMode::Translate,
+        };
+        self.gizmo_active_axis = gizmo_active_axis;
         let selected_runtime_entity = self
             .current_selection_index()
             .and_then(|index| self.scene_runtime.get(index))
             .and_then(|runtime| runtime.root_entity);
         let current_selection_index = self.current_selection_index();
+        if self.selection_id != previous_selection_id {
+            if let Some(selected) = current_selection_index {
+                if let Some(runtime) = self.scene_runtime.get(selected) {
+                    if runtime.extent[0] > 0.0 || runtime.extent[1] > 0.0 || runtime.extent[2] > 0.0
+                    {
+                        self.orbit_pivot = runtime.center;
+                    }
+                }
+            }
+        }
 
         if let Some(render) = &mut self.render {
             render.set_selected_entity(selected_runtime_entity);
@@ -582,23 +1244,6 @@ impl App {
             if (environment_intensity - previous_environment_intensity).abs() > f32::EPSILON {
                 render.set_environment_intensity(environment_intensity);
             }
-            if environment_generate {
-                match generate_ktx_from_hdr(&hdr_path_string) {
-                    Ok((ibl_path, skybox_path)) => {
-                        self.ui.set_environment_status(format!(
-                            "Generated KTX:\nIBL: {}\nSkybox: {}",
-                            ibl_path, skybox_path
-                        ));
-                        let (hdr_buf, ibl_buf, sky_buf) = self.ui.environment_paths_mut();
-                        write_string_to_buffer(&hdr_path_string, hdr_buf);
-                        write_string_to_buffer(&ibl_path, ibl_buf);
-                        write_string_to_buffer(&skybox_path, sky_buf);
-                    }
-                    Err(message) => {
-                        self.ui.set_environment_status(message);
-                    }
-                }
-            }
             if selected_material_global_index == previous_material_selection
                 && previous_material_params != material_params
             {
@@ -618,37 +1263,12 @@ impl App {
                 {
                     self.ui.set_material_params(params);
                 }
-                if selected_material_global_index >= 0 {
-                    if let Some(active_binding) = self
-                        .assets
-                        .material_binding(selected_material_global_index as usize)
-                        .cloned()
-                    {
-                        let desired_param = material_texture_param_string.trim();
-                        let matched = self.scene.texture_bindings().iter().find(|entry| {
-                            entry.object_id == active_binding.object_id
-                                && entry.material_slot == active_binding.material_slot
-                                && entry.binding.texture_param == desired_param
-                        });
-                        let fallback = self.scene.texture_bindings().iter().find(|entry| {
-                            entry.object_id == active_binding.object_id
-                                && entry.material_slot == active_binding.material_slot
-                        });
-                        if let Some(entry) = matched.or(fallback) {
-                            let (param_buf, source_buf) = self.ui.material_texture_binding_mut();
-                            write_string_to_buffer(&entry.binding.texture_param, param_buf);
-                            write_string_to_buffer(&entry.binding.source_path, source_buf);
-                            self.ui.set_material_wrap_repeat(
-                                entry.binding.wrap_repeat_u,
-                                entry.binding.wrap_repeat_v,
-                            );
-                        } else {
-                            let (_param_buf, source_buf) = self.ui.material_texture_binding_mut();
-                            write_string_to_buffer("", source_buf);
-                            self.ui.set_material_wrap_repeat(true, true);
-                        }
-                    }
-                }
+                sync_material_binding_rows_from_scene(
+                    &mut self.ui,
+                    &self.scene,
+                    &self.assets,
+                    selected_material_global_index,
+                );
             }
 
         }
@@ -668,33 +1288,55 @@ impl App {
             let result = self.execute_scene_command(command);
             self.apply_command_feedback("Failed to update material parameters", result);
         }
-        let mut picked_texture_path: Option<String> = None;
-        if material_pick_texture {
+        if delete_selected || self.delete_selection_requested {
+            self.delete_selection_requested = false;
+            if let Some(index) = self.current_selection_index() {
+                let result = self.execute_scene_command(SceneCommand::DeleteObject { index });
+                self.apply_command_feedback("Failed to delete selected object", result);
+            }
+        }
+        let mut effective_apply_index = material_binding_apply_index;
+        if material_binding_pick_index >= 0 {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Texture", &["ktx", "png", "jpg", "jpeg"])
                 .pick_file()
             {
                 if let Some(path_string) = path.to_str() {
-                    picked_texture_path = Some(path_string.to_string());
-                    let (_param_buf, source_buf) = self.ui.material_texture_binding_mut();
-                    write_string_to_buffer(path_string, source_buf);
+                    let picked_index = material_binding_pick_index as usize;
+                    if picked_index < MATERIAL_TEXTURE_PARAMS.len() {
+                        if let Some(row) = self.ui.material_binding_rows_mut().get_mut(picked_index)
+                        {
+                            write_string_to_buffer(path_string, &mut row.source);
+                            effective_apply_index = material_binding_pick_index;
+                        }
+                    }
                 }
             }
         }
-        if material_apply_texture || picked_texture_path.is_some() {
-            if selected_material_global_index >= 0 {
+        if effective_apply_index >= 0 && selected_material_global_index >= 0 {
+            let apply_index = effective_apply_index as usize;
+            if apply_index < MATERIAL_TEXTURE_PARAMS.len() {
                 if let Some(binding) = self
                     .assets
                     .material_binding(selected_material_global_index as usize)
                     .cloned()
                 {
-                    let effective_source =
-                        picked_texture_path.as_deref().unwrap_or(&material_texture_source_string);
+                    let row = self.ui.material_binding_rows()[apply_index];
+                    let source_path = buffer_to_string(&row.source);
+                    let color_space = if row.srgb {
+                        TextureColorSpace::Srgb
+                    } else {
+                        TextureColorSpace::Linear
+                    };
                     match prepare_texture_binding_data(
-                        &material_texture_param_string,
-                        effective_source,
-                        material_wrap_repeat_u,
-                        material_wrap_repeat_v,
+                        MATERIAL_TEXTURE_PARAMS[apply_index],
+                        &source_path,
+                        row.wrap_repeat_u,
+                        row.wrap_repeat_v,
+                        color_space,
+                        row.uv_offset,
+                        row.uv_scale,
+                        row.uv_rotation_deg,
                     ) {
                         Ok(texture_binding) => {
                             let result = self.execute_scene_command(
@@ -729,51 +1371,37 @@ impl App {
                     let (_tex_param, _tex_source, hdr_buf, _ibl_buf, _sky_buf) =
                         self.ui.texture_and_environment_paths_mut();
                     write_string_to_buffer(path_string, hdr_buf);
-                }
-            }
-        }
-        if environment_pick_ibl {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("KTX", &["ktx"])
-                .pick_file()
-            {
-                if let Some(path_string) = path.to_str() {
-                    ibl_path_string = path_string.to_string();
-                    let (_tex_param, _tex_source, _hdr_buf, ibl_buf, _sky_buf) =
-                        self.ui.texture_and_environment_paths_mut();
-                    write_string_to_buffer(path_string, ibl_buf);
-                    environment_apply = true;
-                }
-            }
-        }
-        if environment_pick_skybox {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("KTX", &["ktx"])
-                .pick_file()
-            {
-                if let Some(path_string) = path.to_str() {
-                    skybox_path_string = path_string.to_string();
-                    let (_tex_param, _tex_source, _hdr_buf, _ibl_buf, sky_buf) =
-                        self.ui.texture_and_environment_paths_mut();
-                    write_string_to_buffer(path_string, sky_buf);
                     environment_apply = true;
                 }
             }
         }
         if environment_apply {
-            let result = self.execute_scene_command(SceneCommand::SetEnvironment {
-                data: EnvironmentData {
-                    hdr_path: hdr_path_string.clone(),
-                    ibl_path: ibl_path_string.clone(),
-                    skybox_path: skybox_path_string.clone(),
-                    intensity: environment_intensity,
-                },
-                apply_runtime: true,
-            });
-            self.apply_command_feedback(
-                "Failed to apply environment",
-                result,
-            );
+            match generate_ktx_from_hdr(&hdr_path_string) {
+                Ok((resolved_ibl_path, resolved_skybox_path)) => {
+                    ibl_path_string = resolved_ibl_path;
+                    skybox_path_string = resolved_skybox_path;
+                    let (_tex_param, _tex_source, _hdr_buf, ibl_buf, sky_buf) =
+                        self.ui.texture_and_environment_paths_mut();
+                    write_string_to_buffer(&ibl_path_string, ibl_buf);
+                    write_string_to_buffer(&skybox_path_string, sky_buf);
+                    let result = self.execute_scene_command(SceneCommand::SetEnvironment {
+                        data: EnvironmentData {
+                            hdr_path: hdr_path_string.clone(),
+                            ibl_path: ibl_path_string.clone(),
+                            skybox_path: skybox_path_string.clone(),
+                            intensity: environment_intensity,
+                        },
+                        apply_runtime: true,
+                    });
+                    self.apply_command_feedback(
+                        "Failed to apply environment",
+                        result,
+                    );
+                }
+                Err(message) => {
+                    self.ui.set_environment_status(message);
+                }
+            }
         }
         if create_gltf {
             self.handle_create_gltf_action();
@@ -845,6 +1473,7 @@ impl App {
                 rotation_deg,
                 scale,
             } => self.command_transform_node(index, position, rotation_deg, scale),
+            SceneCommand::DeleteObject { index } => self.command_delete_object(index),
             SceneCommand::SaveScene { path } => self.command_save_scene(&path),
             SceneCommand::LoadScene { path } => self.command_load_scene(&path),
         }
@@ -1182,6 +1811,23 @@ impl App {
             return Err(CommandError::RenderTransformManagerUnavailable);
         }
         Ok(CommandOutcome::None)
+    }
+
+    fn command_delete_object(&mut self, index: usize) -> Result<CommandOutcome, CommandError> {
+        let Some(removed) = self.scene.remove_object(index) else {
+            return Err(CommandError::SceneObjectNotFound { index });
+        };
+        self.selection_id = None;
+        match self.rebuild_runtime_scene() {
+            Ok(()) => Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Info,
+                message: format!("Deleted object '{}'.", removed.name),
+            })),
+            Err(err) => Ok(CommandOutcome::Notice(CommandNotice {
+                severity: CommandSeverity::Warning,
+                message: format!("Deleted object '{}' with warnings:\n{}", removed.name, err),
+            })),
+        }
     }
 
     fn command_save_scene(&mut self, path: &std::path::Path) -> Result<CommandOutcome, CommandError> {
@@ -1633,7 +2279,7 @@ fn format_rebuild_errors(errors: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{format_rebuild_errors, App, CommandError, SceneCommand};
-    use crate::scene::{MaterialTextureBindingData, MediaSourceKind};
+    use crate::scene::{MaterialTextureBindingData, MediaSourceKind, TextureColorSpace};
 
     #[test]
     fn rebuild_error_format_empty_is_none() {
@@ -1664,6 +2310,10 @@ mod tests {
                 source_hash: None,
                 wrap_repeat_u: true,
                 wrap_repeat_v: true,
+                color_space: TextureColorSpace::Srgb,
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                uv_rotation_deg: 0.0,
             },
         });
         assert!(matches!(result, Err(CommandError::TextureBindingSourceEmpty)));
@@ -1683,6 +2333,10 @@ mod tests {
                 source_hash: None,
                 wrap_repeat_u: true,
                 wrap_repeat_v: true,
+                color_space: TextureColorSpace::Srgb,
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                uv_rotation_deg: 0.0,
             },
         });
         assert!(result.is_ok());
@@ -1717,20 +2371,25 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
     if hdr_path.trim().is_empty() {
         return Err("Provide an equirect HDR path to generate KTX.".to_string());
     }
-    let hdr = PathBuf::from(hdr_path.trim());
+    let hdr = resolve_path_for_read(hdr_path.trim())?;
     if !hdr.exists() {
         return Err(format!("HDR file not found: {}", hdr.display()));
     }
-
-    let stem = hdr
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("environment");
+    let hdr_hash = hash_file_bytes(&hdr)?;
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output_root = manifest_dir.join("assets").join("environments");
-    let output_prefix = output_root.join(stem);
+    let output_root = manifest_dir.join("assets").join("cache").join("environments");
+    let output_prefix = output_root.join(&hdr_hash);
+    let output_dir = output_root.join(&hdr_hash);
+    let ibl_path = output_dir.join(format!("{hdr_hash}_ibl.ktx"));
+    let skybox_path = output_dir.join(format!("{hdr_hash}_skybox.ktx"));
     std::fs::create_dir_all(&output_root)
         .map_err(|err| format!("Failed creating environment folder: {}", err))?;
+    if ibl_path.exists() && skybox_path.exists() {
+        return Ok((
+            display_path_for_scene(&ibl_path),
+            display_path_for_scene(&skybox_path),
+        ));
+    }
 
     let cmgen_path = PathBuf::from(env!("FILAMENT_BIN_DIR")).join("cmgen.exe");
     if !cmgen_path.exists() {
@@ -1752,13 +2411,9 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
     if !status.success() {
         return Err(format!("cmgen failed with status {:?}.", status.code()));
     }
-
-    let output_dir = output_root.join(stem);
-    let ibl_path = output_dir.join(format!("{stem}_ibl.ktx"));
-    let skybox_path = output_dir.join(format!("{stem}_skybox.ktx"));
     Ok((
-        ibl_path.to_string_lossy().to_string(),
-        skybox_path.to_string_lossy().to_string(),
+        display_path_for_scene(&ibl_path),
+        display_path_for_scene(&skybox_path),
     ))
 }
 
@@ -1767,6 +2422,10 @@ fn prepare_texture_binding_data(
     source_path: &str,
     wrap_repeat_u: bool,
     wrap_repeat_v: bool,
+    color_space: TextureColorSpace,
+    uv_offset: [f32; 2],
+    uv_scale: [f32; 2],
+    uv_rotation_deg: f32,
 ) -> Result<MaterialTextureBindingData, String> {
     let texture_param = texture_param.trim();
     if texture_param.is_empty() {
@@ -1778,7 +2437,7 @@ fn prepare_texture_binding_data(
     }
 
     let source_kind = MediaSourceKind::Image;
-    let (runtime_ktx_path, source_hash) = resolve_runtime_texture_cache(source_path)?;
+    let (runtime_ktx_path, source_hash) = resolve_runtime_texture_cache(source_path, color_space)?;
 
     Ok(MaterialTextureBindingData {
         texture_param: texture_param.to_string(),
@@ -1788,10 +2447,57 @@ fn prepare_texture_binding_data(
         source_hash: Some(source_hash),
         wrap_repeat_u,
         wrap_repeat_v,
+        color_space,
+        uv_offset,
+        uv_scale,
+        uv_rotation_deg,
     })
 }
 
-fn resolve_runtime_texture_cache(source_path: &str) -> Result<(String, String), String> {
+fn sync_material_binding_rows_from_scene(
+    ui: &mut UiState,
+    scene: &SceneState,
+    assets: &AssetManager,
+    selected_material_global_index: i32,
+) {
+    let rows = ui.material_binding_rows_mut();
+    for row in rows.iter_mut() {
+        row.source.fill(0);
+        row.wrap_repeat_u = true;
+        row.wrap_repeat_v = true;
+        row.srgb = true;
+        row.uv_offset = [0.0, 0.0];
+        row.uv_scale = [1.0, 1.0];
+        row.uv_rotation_deg = 0.0;
+    }
+    if selected_material_global_index < 0 {
+        return;
+    }
+    let Some(binding_key) = assets.material_binding(selected_material_global_index as usize) else {
+        return;
+    };
+    for (row_index, texture_param) in MATERIAL_TEXTURE_PARAMS.iter().enumerate() {
+        let Some(entry) = scene.texture_bindings().iter().find(|entry| {
+            entry.object_id == binding_key.object_id
+                && entry.material_slot == binding_key.material_slot
+                && entry.binding.texture_param == *texture_param
+        }) else {
+            continue;
+        };
+        write_string_to_buffer(&entry.binding.source_path, &mut rows[row_index].source);
+        rows[row_index].wrap_repeat_u = entry.binding.wrap_repeat_u;
+        rows[row_index].wrap_repeat_v = entry.binding.wrap_repeat_v;
+        rows[row_index].srgb = entry.binding.color_space == TextureColorSpace::Srgb;
+        rows[row_index].uv_offset = entry.binding.uv_offset;
+        rows[row_index].uv_scale = entry.binding.uv_scale;
+        rows[row_index].uv_rotation_deg = entry.binding.uv_rotation_deg;
+    }
+}
+
+fn resolve_runtime_texture_cache(
+    source_path: &str,
+    color_space: TextureColorSpace,
+) -> Result<(String, String), String> {
     let source = resolve_path_for_read(source_path)?;
     let extension = source
         .extension()
@@ -1809,7 +2515,12 @@ fn resolve_runtime_texture_cache(source_path: &str) -> Result<(String, String), 
         ));
     }
 
-    let source_hash = hash_file_bytes(&source)?;
+    let base_hash = hash_file_bytes(&source)?;
+    let color_tag = match color_space {
+        TextureColorSpace::Srgb => "srgb",
+        TextureColorSpace::Linear => "linear",
+    };
+    let source_hash = format!("{base_hash}_{color_tag}");
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cache_dir = manifest_dir.join("assets").join("cache").join("textures");
     std::fs::create_dir_all(&cache_dir)
@@ -1823,6 +2534,10 @@ fn resolve_runtime_texture_cache(source_path: &str) -> Result<(String, String), 
         }
         let status = Command::new(&mipgen_path)
             .args(["-q", "-f", "ktx"])
+            .args(match color_space {
+                TextureColorSpace::Srgb => Vec::<&str>::new(),
+                TextureColorSpace::Linear => vec!["--linear"],
+            })
             .arg(&normalized_png_path)
             .arg(&ktx_path)
             .status()
@@ -1893,6 +2608,179 @@ fn display_path_for_scene(path: &std::path::Path) -> String {
         return relative.to_string_lossy().to_string();
     }
     path.to_string_lossy().to_string()
+}
+
+fn ray_intersect_sphere(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    center: [f32; 3],
+    radius: f32,
+) -> Option<f32> {
+    let oc = [
+        origin[0] - center[0],
+        origin[1] - center[1],
+        origin[2] - center[2],
+    ];
+    let a = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+    let b = 2.0 * (oc[0] * dir[0] + oc[1] * dir[1] + oc[2] * dir[2]);
+    let c = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - radius * radius;
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let sqrt_d = discriminant.sqrt();
+    let t0 = (-b - sqrt_d) / (2.0 * a);
+    let t1 = (-b + sqrt_d) / (2.0 * a);
+    if t0 >= 0.0 {
+        Some(t0)
+    } else if t1 >= 0.0 {
+        Some(t1)
+    } else {
+        None
+    }
+}
+
+fn closest_line_line_param(
+    line_a_origin: [f32; 3],
+    line_a_dir: [f32; 3],
+    line_b_origin: [f32; 3],
+    line_b_dir: [f32; 3],
+) -> Option<f32> {
+    let w0 = [
+        line_a_origin[0] - line_b_origin[0],
+        line_a_origin[1] - line_b_origin[1],
+        line_a_origin[2] - line_b_origin[2],
+    ];
+    let a = dot3(line_a_dir, line_a_dir);
+    let b = dot3(line_a_dir, line_b_dir);
+    let c = dot3(line_b_dir, line_b_dir);
+    let d = dot3(line_a_dir, w0);
+    let e = dot3(line_b_dir, w0);
+    let denom = a * c - b * b;
+    if denom.abs() <= 1e-6 {
+        return Some(e / c.max(1e-6));
+    }
+    Some((a * e - b * d) / denom)
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn ray_plane_intersection(
+    ray_origin: [f32; 3],
+    ray_dir: [f32; 3],
+    plane_origin: [f32; 3],
+    plane_normal: [f32; 3],
+) -> Option<[f32; 3]> {
+    let denom = dot3(ray_dir, plane_normal);
+    if denom.abs() <= 1e-6 {
+        return None;
+    }
+    let rel = [
+        plane_origin[0] - ray_origin[0],
+        plane_origin[1] - ray_origin[1],
+        plane_origin[2] - ray_origin[2],
+    ];
+    let t = dot3(rel, plane_normal) / denom;
+    if t < 0.0 || !t.is_finite() {
+        return None;
+    }
+    Some([
+        ray_origin[0] + ray_dir[0] * t,
+        ray_origin[1] + ray_dir[1] * t,
+        ray_origin[2] + ray_dir[2] * t,
+    ])
+}
+
+fn euler_deg_to_mat3(rotation_deg: [f32; 3]) -> Mat3 {
+    let rx = rotation_deg[0].to_radians();
+    let ry = rotation_deg[1].to_radians();
+    let rz = rotation_deg[2].to_radians();
+    Mat3::from_euler(EulerRot::ZYX, rz, ry, rx)
+}
+
+fn mat3_to_euler_deg(mat: Mat3) -> [f32; 3] {
+    let (rz, ry, rx) = mat.to_euler(EulerRot::ZYX);
+    [
+        normalize_angle_deg(rx.to_degrees()),
+        normalize_angle_deg(ry.to_degrees()),
+        normalize_angle_deg(rz.to_degrees()),
+    ]
+}
+
+fn normalize_angle_deg(mut a: f32) -> f32 {
+    while a > 180.0 {
+        a -= 360.0;
+    }
+    while a < -180.0 {
+        a += 360.0;
+    }
+    a
+}
+
+fn map_arcball_vector(
+    mouse: (f32, f32),
+    center_screen: [f32; 2],
+    radius_px: f32,
+) -> [f32; 3] {
+    let r = radius_px.max(1.0);
+    let x = (mouse.0 - center_screen[0]) / r;
+    let y = (center_screen[1] - mouse.1) / r;
+    let d2 = x * x + y * y;
+    let z = if d2 <= 0.5 {
+        (1.0 - d2).sqrt()
+    } else {
+        0.5 / d2.sqrt()
+    };
+    let mut v = Vec3::new(x, y, z);
+    if v.length_squared() <= 1e-10 {
+        return [0.0, 0.0, 1.0];
+    }
+    v = v.normalize();
+    v.to_array()
+}
+
+fn ray_intersect_aabb(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    center: [f32; 3],
+    extent: [f32; 3],
+) -> Option<f32> {
+    let min = [
+        center[0] - extent[0],
+        center[1] - extent[1],
+        center[2] - extent[2],
+    ];
+    let max = [
+        center[0] + extent[0],
+        center[1] + extent[1],
+        center[2] + extent[2],
+    ];
+    let mut tmin = 0.0f32;
+    let mut tmax = f32::INFINITY;
+    for axis in 0..3 {
+        let d = dir[axis];
+        let o = origin[axis];
+        if d.abs() < 1e-6 {
+            if o < min[axis] || o > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let inv_d = 1.0 / d;
+        let mut t1 = (min[axis] - o) * inv_d;
+        let mut t2 = (max[axis] - o) * inv_d;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmin > tmax {
+            return None;
+        }
+    }
+    Some(tmin)
 }
 
 fn apply_material_override(
@@ -2145,6 +3033,31 @@ impl ApplicationHandler for App {
                         }
                         return;
                     }
+                    if pressed && event.physical_key == PhysicalKey::Code(KeyCode::Delete) {
+                        self.delete_selection_requested = true;
+                        return;
+                    }
+                    if pressed {
+                        match event.physical_key {
+                            PhysicalKey::Code(KeyCode::KeyQ) => {
+                                self.transform_tool_mode = TransformToolMode::Select;
+                                return;
+                            }
+                            PhysicalKey::Code(KeyCode::KeyW) => {
+                                self.transform_tool_mode = TransformToolMode::Translate;
+                                return;
+                            }
+                            PhysicalKey::Code(KeyCode::KeyE) => {
+                                self.transform_tool_mode = TransformToolMode::Rotate;
+                                return;
+                            }
+                            PhysicalKey::Code(KeyCode::KeyR) => {
+                                self.transform_tool_mode = TransformToolMode::Scale;
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
                     self.input.handle_key(event.physical_key, pressed);
                     if pressed {
                         match event.physical_key {
@@ -2192,7 +3105,11 @@ impl ApplicationHandler for App {
                     ui_capture_mouse = render.ui_want_capture_mouse();
                 }
                 if !ui_capture_mouse {
-                    if let (Some((px, py)), Some(mode)) = (prev_pos, self.camera_drag_mode) {
+                    if self.mouse_buttons[0] && self.gizmo_active_axis != 0 {
+                        self.begin_gizmo_drag_if_needed(new_pos);
+                        self.apply_transform_tool_drag(new_pos);
+                    } else if let (Some((px, py)), Some(mode)) = (prev_pos, self.camera_drag_mode)
+                    {
                         let dx = new_pos.0 - px;
                         let dy = new_pos.1 - py;
                         match mode {
@@ -2213,6 +3130,8 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } => {
                 self.mouse_pos = None;
                 self.camera_drag_mode = None;
+                self.gizmo_drag_state = None;
+                self.pending_click_select = false;
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(-f32::MAX, -f32::MAX);
                 }
@@ -2231,7 +3150,30 @@ impl ApplicationHandler for App {
                     if !ui_capture_mouse {
                         match self.camera_control_profile {
                             CameraControlProfile::Blender => match (button, pressed) {
+                                (MouseButton::Left, true) => {
+                                    self.pending_click_select = true;
+                                }
+                                (MouseButton::Left, false) => {
+                                    if self.pending_click_select && self.gizmo_active_axis == 0 {
+                                        if let Some((mx, my)) = self.mouse_pos {
+                                            let picked = self.pick_scene_object(mx, my);
+                                            match picked {
+                                                Some(hit) => self.set_selection_from_index(Some(hit)),
+                                                None => {
+                                                    if self.transform_tool_mode
+                                                        == TransformToolMode::Select
+                                                    {
+                                                        self.set_selection_from_index(None);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    self.pending_click_select = false;
+                                    self.gizmo_drag_state = None;
+                                }
                                 (MouseButton::Middle, true) => {
+                                    self.pending_click_select = false;
                                     let state = self.modifiers.state();
                                     if state.control_key() {
                                         self.camera_drag_mode = Some(CameraDragMode::Dolly);
@@ -2251,6 +3193,10 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
+                    if !pressed && button == MouseButton::Left {
+                        self.pending_click_select = false;
+                        self.gizmo_drag_state = None;
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -2263,7 +3209,7 @@ impl ApplicationHandler for App {
                     render.ui_mouse_wheel(wheel_x, wheel_y);
                     ui_capture_mouse = render.ui_want_capture_mouse();
                 }
-                if !ui_capture_mouse {
+                if !ui_capture_mouse && !self.mouse_over_sidebar_ui() {
                     self.dolly_camera(wheel_y * 0.15);
                 }
             }

@@ -19,5 +19,4 @@ Thumbs.db
 /third_party/filament/
 
 # Generated runtime texture cache artifacts (do not commit)
-/assets/cache/textures/*.ktx
-/assets/cache/textures/*.normalized.png
+/assets/cache/

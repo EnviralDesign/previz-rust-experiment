@@ -223,12 +223,17 @@ impl RenderContext {
         material_metallic: &mut f32,
         material_roughness: &mut f32,
         material_emissive_rgb: &mut [f32; 3],
-        material_texture_param: &mut [u8],
-        material_texture_source: &mut [u8],
-        material_wrap_repeat_u: &mut bool,
-        material_wrap_repeat_v: &mut bool,
-        material_pick_texture: &mut bool,
-        material_apply_texture: &mut bool,
+        material_binding_param_names: &[CString],
+        material_binding_sources: &mut [u8],
+        material_binding_source_stride: i32,
+        material_binding_wrap_repeat_u: &mut [bool],
+        material_binding_wrap_repeat_v: &mut [bool],
+        material_binding_srgb: &mut [bool],
+        material_binding_uv_offset: &mut [f32],
+        material_binding_uv_scale: &mut [f32],
+        material_binding_uv_rotation_deg: &mut [f32],
+        material_binding_pick_index: &mut i32,
+        material_binding_apply_index: &mut i32,
         hdr_path: &mut [u8],
         ibl_path: &mut [u8],
         skybox_path: &mut [u8],
@@ -243,6 +248,13 @@ impl RenderContext {
         create_environment: &mut bool,
         save_scene: &mut bool,
         load_scene: &mut bool,
+        transform_tool_mode: &mut i32,
+        delete_selected: &mut bool,
+        gizmo_screen_points_xy: &[f32; 8],
+        gizmo_visible: bool,
+        gizmo_origin_world_xyz: &[f32; 3],
+        camera_world_xyz: &[f32; 3],
+        gizmo_active_axis: &mut i32,
         delta_seconds: f32,
     ) -> f32 {
         let frame_start = std::time::Instant::now();
@@ -251,6 +263,10 @@ impl RenderContext {
                 object_names.iter().map(|name| name.as_ptr()).collect();
             let material_ptrs: Vec<*const std::ffi::c_char> =
                 material_names.iter().map(|name| name.as_ptr()).collect();
+            let texture_param_ptrs: Vec<*const std::ffi::c_char> = material_binding_param_names
+                .iter()
+                .map(|name| name.as_ptr())
+                .collect();
             ui_helper.render_scene_ui(
                 delta_seconds,
                 assets_title,
@@ -271,12 +287,17 @@ impl RenderContext {
                 material_metallic,
                 material_roughness,
                 material_emissive_rgb,
-                material_texture_param,
-                material_texture_source,
-                material_wrap_repeat_u,
-                material_wrap_repeat_v,
-                material_pick_texture,
-                material_apply_texture,
+                &texture_param_ptrs,
+                material_binding_sources,
+                material_binding_source_stride,
+                material_binding_wrap_repeat_u,
+                material_binding_wrap_repeat_v,
+                material_binding_srgb,
+                material_binding_uv_offset,
+                material_binding_uv_scale,
+                material_binding_uv_rotation_deg,
+                material_binding_pick_index,
+                material_binding_apply_index,
                 hdr_path,
                 ibl_path,
                 skybox_path,
@@ -291,6 +312,13 @@ impl RenderContext {
                 create_environment,
                 save_scene,
                 load_scene,
+                transform_tool_mode,
+                delete_selected,
+                gizmo_screen_points_xy,
+                gizmo_visible,
+                gizmo_origin_world_xyz,
+                camera_world_xyz,
+                gizmo_active_axis,
             );
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {

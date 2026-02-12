@@ -28,6 +28,7 @@ mod tests {
     use crate::scene::{
         AssetData, DirectionalLightData, EnvironmentData, MaterialOverrideData,
         MaterialTextureBindingData, MediaSourceKind, SceneObject, SceneObjectKind, SceneState,
+        TextureColorSpace,
     };
 
     #[test]
@@ -206,6 +207,10 @@ mod tests {
                 source_hash: Some("abc123".to_string()),
                 wrap_repeat_u: true,
                 wrap_repeat_v: false,
+                color_space: TextureColorSpace::Srgb,
+                uv_offset: [0.0, 0.0],
+                uv_scale: [1.0, 1.0],
+                uv_rotation_deg: 0.0,
             },
         );
 
