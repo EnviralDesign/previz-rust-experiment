@@ -122,9 +122,8 @@ struct GizmoDragState {
     drag_plane_normal: [f32; 3],
     uniform_scale_start_radius: f32,
     axis_world_length: f32,
-    arcball_center_screen: [f32; 2],
     arcball_radius_px: f32,
-    arcball_last_vec_camera: [f32; 3],
+    arcball_last_mouse: (f32, f32),
 }
 
 enum CommandSeverity {
@@ -508,29 +507,41 @@ impl App {
             TransformToolMode::Rotate => {
                 let mut axis = [0.0f32, 0.0, 0.0];
                 if state_snapshot.handle == GIZMO_ROTATE_ARCBALL {
-                    let cur_cam = map_arcball_vector(
-                        mouse,
-                        state_snapshot.arcball_center_screen,
-                        state_snapshot.arcball_radius_px,
-                    );
-                    let mut prev_cam = state_snapshot.arcball_last_vec_camera;
-                    if let Some(state_mut) = self.gizmo_drag_state.as_mut() {
-                        prev_cam = state_mut.arcball_last_vec_camera;
-                        state_mut.arcball_last_vec_camera = cur_cam;
-                    }
-                    let v0 = Vec3::from_array(prev_cam);
-                    let v1 = Vec3::from_array(cur_cam);
-                    let axis_cam = v0.cross(v1);
-                    let axis_len2 = axis_cam.length_squared();
-                    if axis_len2 <= 1e-10 {
+                    // Delta-based trackball: constant angular gain regardless of
+                    // cursor distance from the arcball center.  Each pixel of mouse
+                    // motion produces the same amount of rotation (≈ 1/radius_px rad).
+                    let prev_mouse = if let Some(state_mut) = self.gizmo_drag_state.as_mut() {
+                        let pm = state_mut.arcball_last_mouse;
+                        state_mut.arcball_last_mouse = mouse;
+                        pm
+                    } else {
+                        return;
+                    };
+
+                    let dx = mouse.0 - prev_mouse.0;
+                    let dy = mouse.1 - prev_mouse.1;
+                    let delta_len_sq = dx * dx + dy * dy;
+                    if delta_len_sq < 0.25 {
+                        // Sub-pixel motion – skip to avoid jitter.
                         return;
                     }
-                    let angle = axis_len2.sqrt().atan2(v0.dot(v1).clamp(-1.0, 1.0));
+                    let delta_len = delta_len_sq.sqrt();
+                    let r = state_snapshot.arcball_radius_px.max(1.0);
+                    let angle = delta_len / r;
+
+                    // Rotation axis in camera space: perpendicular to the screen-
+                    // space displacement direction.  Convention matches the classic
+                    // arcball cross-product at the sphere center:
+                    //   mouse right  → rotate around camera-up   (+Y_cam)
+                    //   mouse up     → rotate around camera-right (-X_cam)
+                    let axis_cam = Vec3::new(dy / delta_len, dx / delta_len, 0.0);
                     let axis_world = self.camera_vec_to_world(axis_cam.to_array());
                     let axis_world_v = Vec3::from_array(axis_world).normalize_or_zero();
                     if axis_world_v.length_squared() <= 1e-10 {
                         return;
                     }
+
+                    // Read the *current* rotation for incremental accumulation.
                     if let Some(object) = self.scene.objects().get(index) {
                         if let SceneObjectKind::Asset(data) = &object.kind {
                             rotation_deg = data.rotation_deg;
@@ -661,9 +672,8 @@ impl App {
         let mut drag_plane_normal = [0.0, 0.0, 0.0];
         let mut start_hit_world = gizmo_origin;
         let mut uniform_scale_start_radius = 1.0;
-        let mut arcball_center_screen = [mouse.0, mouse.1];
         let mut arcball_radius_px = 64.0f32;
-        let mut arcball_last_vec_camera = [0.0, 0.0, 1.0];
+        let arcball_last_mouse = mouse;
         let axis_world_length = self.gizmo_axis_world_length(gizmo_origin);
 
         if let Some(axis) = Self::gizmo_axis_from_handle(handle) {
@@ -690,14 +700,9 @@ impl App {
                 start_hit_world = hit;
             }
         } else if handle == GIZMO_ROTATE_ARCBALL {
-            if let Some(center_screen) = self.world_to_screen(gizmo_origin) {
-                arcball_center_screen = center_screen;
-            }
             if let Some(reference) = self.gizmo_axis_screen_reference_len(gizmo_origin) {
                 arcball_radius_px = (reference * 0.86).max(20.0);
             }
-            arcball_last_vec_camera =
-                map_arcball_vector(mouse, arcball_center_screen, arcball_radius_px);
         } else if handle == GIZMO_SCALE_UNIFORM {
             if let Some(center_screen) = self.world_to_screen(gizmo_origin) {
                 uniform_scale_start_radius =
@@ -722,9 +727,8 @@ impl App {
             drag_plane_normal,
             uniform_scale_start_radius,
             axis_world_length,
-            arcball_center_screen,
             arcball_radius_px,
-            arcball_last_vec_camera,
+            arcball_last_mouse,
         });
     }
 
@@ -2719,6 +2723,7 @@ fn normalize_angle_deg(mut a: f32) -> f32 {
     a
 }
 
+#[allow(dead_code)]
 fn map_arcball_vector(
     mouse: (f32, f32),
     center_screen: [f32; 2],

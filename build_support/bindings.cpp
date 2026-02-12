@@ -1600,82 +1600,120 @@ void filagui_imgui_helper_render_scene_ui(
                             v[2] /= len;
                         }
                     };
-                    auto ring_front_mask = [&](int ring_axis, int count) -> std::vector<uint8_t> {
-                        std::vector<uint8_t> mask;
-                        mask.resize((size_t)count, 1);
+                    // Returns continuous dot-product of each ring sample's 3D
+                    // normal against the view direction.  Positive = front hemisphere.
+                    auto ring_front_dot = [&](int ring_axis, int count) -> std::vector<float> {
+                        std::vector<float> dots;
+                        dots.resize((size_t)count, 1.0f);
                         if (!gizmo_origin_world_xyz || !camera_world_xyz || count <= 0) {
-                            return mask;
+                            return dots;
                         }
-                        float view_to_camera[3] = {
+                        float view_dir[3] = {
                             camera_world_xyz[0] - gizmo_origin_world_xyz[0],
                             camera_world_xyz[1] - gizmo_origin_world_xyz[1],
                             camera_world_xyz[2] - gizmo_origin_world_xyz[2],
                         };
-                        normalize3(view_to_camera);
+                        normalize3(view_dir);
                         for (int i = 0; i < count; ++i) {
                             float t = (float)i / (float)count;
                             float a = t * 6.28318530718f;
                             float ca = std::cos(a);
                             float sa = std::sin(a);
                             float n[3] = {0.0f, 0.0f, 0.0f};
-                            // Ring local point direction in world-space (world axes gizmo).
-                            if (ring_axis == 0) { // around X => YZ plane
-                                n[1] = ca;
-                                n[2] = sa;
-                            } else if (ring_axis == 1) { // around Y => XZ plane
-                                n[0] = ca;
-                                n[2] = sa;
-                            } else { // around Z => XY plane
-                                n[0] = ca;
-                                n[1] = sa;
-                            }
-                            float d = n[0] * view_to_camera[0] + n[1] * view_to_camera[1] + n[2] * view_to_camera[2];
-                            mask[(size_t)i] = (d >= 0.0f) ? 1 : 0;
+                            if (ring_axis == 0) { n[1] = ca; n[2] = sa; }
+                            else if (ring_axis == 1) { n[0] = ca; n[2] = sa; }
+                            else { n[0] = ca; n[1] = sa; }
+                            dots[(size_t)i] = n[0]*view_dir[0] + n[1]*view_dir[1] + n[2]*view_dir[2];
                         }
-                        return mask;
+                        return dots;
                     };
-                    auto ring_distance_clipped = [&](ImVec2 p, const std::vector<ImVec2>& pts, const std::vector<uint8_t>& front, float inner_r) -> float {
-                        if (pts.size() < 2) {
-                            return FLT_MAX;
-                        }
+
+                    // Exact-split pick distance: splits each segment at the precise
+                    // hemisphere boundary (dot == 0) and inner-circle boundary so
+                    // that only truly visible arc portions participate in picking.
+                    auto ring_distance_clipped = [&](ImVec2 p, const std::vector<ImVec2>& pts, const std::vector<float>& dot_vals, float inner_r) -> float {
+                        if (pts.size() < 2) return FLT_MAX;
                         float inner_r2 = inner_r * inner_r;
                         float best = FLT_MAX;
                         for (size_t i = 0; i < pts.size(); ++i) {
                             size_t j = (i + 1) % pts.size();
-                            const ImVec2& a = pts[i];
-                            const ImVec2& b = pts[j];
-                            ImVec2 da = vsub(a, center);
-                            ImVec2 db = vsub(b, center);
-                            bool va = (da.x * da.x + da.y * da.y) >= inner_r2;
-                            bool vb = (db.x * db.x + db.y * db.y) >= inner_r2;
-                            bool fa = front.empty() ? true : front[i] != 0;
-                            bool fb = front.empty() ? true : front[j] != 0;
-                            if (!(va && vb && (fa || fb))) {
+                            const ImVec2& sa = pts[i];
+                            const ImVec2& sb = pts[j];
+                            float da = dot_vals.empty() ? 1.0f : dot_vals[i];
+                            float db = dot_vals.empty() ? 1.0f : dot_vals[j];
+                            // Hemisphere visible t-range
+                            float th0 = 0.0f, th1 = 1.0f;
+                            if (da < 0.0f && db < 0.0f) continue;
+                            if (da < 0.0f) { float tc = -da / (db - da); th0 = tc; }
+                            else if (db < 0.0f) { float tc = -da / (db - da); th1 = tc; }
+                            if (th0 >= th1) continue;
+                            // Inner circle: |P(t)-center|^2 = inner_r^2
+                            ImVec2 d0 = vsub(sa, center);
+                            ImVec2 e = vsub(sb, sa);
+                            float qA = e.x*e.x + e.y*e.y;
+                            float qB = 2.0f*(d0.x*e.x + d0.y*e.y);
+                            float qC = d0.x*d0.x + d0.y*d0.y - inner_r2;
+                            auto dist_range = [&](float ts, float te) {
+                                if (ts >= te) return;
+                                ImVec2 pa(sa.x + ts*(sb.x-sa.x), sa.y + ts*(sb.y-sa.y));
+                                ImVec2 pb(sa.x + te*(sb.x-sa.x), sa.y + te*(sb.y-sa.y));
+                                best = std::min(best, distance_to_segment(p, pa, pb));
+                            };
+                            float disc = qB*qB - 4*qA*qC;
+                            if (qA < 1e-10f || disc < 0.0f) {
+                                if (qC >= 0.0f) dist_range(th0, th1);
                                 continue;
                             }
-                            best = std::min(best, distance_to_segment(p, a, b));
+                            float sq = std::sqrt(disc);
+                            float t1 = (-qB - sq) / (2*qA);
+                            float t2 = (-qB + sq) / (2*qA);
+                            dist_range(th0, std::min(th1, t1));
+                            dist_range(std::max(th0, t2), th1);
                         }
                         return best;
                     };
-                    auto draw_ring_clipped = [&](const std::vector<ImVec2>& pts, const std::vector<uint8_t>& front, float inner_r, ImU32 color, float thick) {
-                        if (pts.size() < 2) {
-                            return;
-                        }
+
+                    // Exact-split ring drawing: each segment is clipped to the
+                    // front-hemisphere manifold (linear dot interpolation == 0) and
+                    // to the inner occluder circle (quadratic in t), then only the
+                    // visible sub-segments are emitted.
+                    auto draw_ring_clipped = [&](const std::vector<ImVec2>& pts, const std::vector<float>& dot_vals, float inner_r, ImU32 color, float thick) {
+                        if (pts.size() < 2) return;
                         float inner_r2 = inner_r * inner_r;
                         for (size_t i = 0; i < pts.size(); ++i) {
                             size_t j = (i + 1) % pts.size();
-                            const ImVec2& a = pts[i];
-                            const ImVec2& b = pts[j];
-                            ImVec2 da = vsub(a, center);
-                            ImVec2 db = vsub(b, center);
-                            bool va = (da.x * da.x + da.y * da.y) >= inner_r2;
-                            bool vb = (db.x * db.x + db.y * db.y) >= inner_r2;
-                            bool fa = front.empty() ? true : front[i] != 0;
-                            bool fb = front.empty() ? true : front[j] != 0;
-                            if (!(va && vb && (fa || fb))) {
+                            const ImVec2& sa = pts[i];
+                            const ImVec2& sb = pts[j];
+                            float da = dot_vals.empty() ? 1.0f : dot_vals[i];
+                            float db = dot_vals.empty() ? 1.0f : dot_vals[j];
+                            // Hemisphere visible t-range
+                            float th0 = 0.0f, th1 = 1.0f;
+                            if (da < 0.0f && db < 0.0f) continue;
+                            if (da < 0.0f) { float tc = -da / (db - da); th0 = tc; }
+                            else if (db < 0.0f) { float tc = -da / (db - da); th1 = tc; }
+                            if (th0 >= th1) continue;
+                            // Inner-circle clipping
+                            ImVec2 d0 = vsub(sa, center);
+                            ImVec2 e = vsub(sb, sa);
+                            float qA = e.x*e.x + e.y*e.y;
+                            float qB = 2.0f*(d0.x*e.x + d0.y*e.y);
+                            float qC = d0.x*d0.x + d0.y*d0.y - inner_r2;
+                            auto draw_range = [&](float ts, float te) {
+                                if (ts >= te) return;
+                                ImVec2 pa(sa.x + ts*(sb.x-sa.x), sa.y + ts*(sb.y-sa.y));
+                                ImVec2 pb(sa.x + te*(sb.x-sa.x), sa.y + te*(sb.y-sa.y));
+                                draw->AddLine(pa, pb, color, thick);
+                            };
+                            float disc = qB*qB - 4*qA*qC;
+                            if (qA < 1e-10f || disc < 0.0f) {
+                                if (qC >= 0.0f) draw_range(th0, th1);
                                 continue;
                             }
-                            draw->AddLine(a, b, color, thick);
+                            float sq = std::sqrt(disc);
+                            float t1 = (-qB - sq) / (2*qA);
+                            float t2 = (-qB + sq) / (2*qA);
+                            draw_range(th0, std::min(th1, t1));
+                            draw_range(std::max(th0, t2), th1);
                         }
                     };
 
@@ -1773,9 +1811,9 @@ void filagui_imgui_helper_render_scene_ui(
                             std::vector<ImVec2> ring_x = ring_points(vy, vz, 0.9f);
                             std::vector<ImVec2> ring_y = ring_points(vx, vz, 0.9f);
                             std::vector<ImVec2> ring_z = ring_points(vx, vy, 0.9f);
-                            std::vector<uint8_t> front_x = ring_front_mask(0, (int)ring_x.size());
-                            std::vector<uint8_t> front_y = ring_front_mask(1, (int)ring_y.size());
-                            std::vector<uint8_t> front_z = ring_front_mask(2, (int)ring_z.size());
+                            std::vector<float> front_x = ring_front_dot(0, (int)ring_x.size());
+                            std::vector<float> front_y = ring_front_dot(1, (int)ring_y.size());
+                            std::vector<float> front_z = ring_front_dot(2, (int)ring_z.size());
                             float dx = ring_distance_clipped(mouse, ring_x, front_x, rotate_inner_clip_r);
                             float dy = ring_distance_clipped(mouse, ring_y, front_y, rotate_inner_clip_r);
                             float dz = ring_distance_clipped(mouse, ring_z, front_z, rotate_inner_clip_r);
@@ -1880,9 +1918,9 @@ void filagui_imgui_helper_render_scene_ui(
                         std::vector<ImVec2> ring_x = ring_points(vy, vz, 0.9f);
                         std::vector<ImVec2> ring_y = ring_points(vx, vz, 0.9f);
                         std::vector<ImVec2> ring_z = ring_points(vx, vy, 0.9f);
-                        std::vector<uint8_t> front_x = ring_front_mask(0, (int)ring_x.size());
-                        std::vector<uint8_t> front_y = ring_front_mask(1, (int)ring_y.size());
-                        std::vector<uint8_t> front_z = ring_front_mask(2, (int)ring_z.size());
+                        std::vector<float> front_x = ring_front_dot(0, (int)ring_x.size());
+                        std::vector<float> front_y = ring_front_dot(1, (int)ring_y.size());
+                        std::vector<float> front_z = ring_front_dot(2, (int)ring_z.size());
                         draw_ring_clipped(
                             ring_x,
                             front_x,
