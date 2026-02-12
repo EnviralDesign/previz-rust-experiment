@@ -52,8 +52,9 @@ struct HandleEntity {
     base_rotation: Mat3,
     billboard_to_camera: bool,
     pickable: bool,
+    base_alpha: f32,
     _mesh: MeshResource,
-    _material_instance: MaterialInstance,
+    material_instance: MaterialInstance,
 }
 
 pub struct EditorOverlay {
@@ -115,6 +116,10 @@ impl EditorOverlay {
             if !handle.pickable || !self.is_handle_mode_visible(handle.handle_id) {
                 continue;
             }
+            let fade = self.handle_fade_factor(handle.handle_id);
+            if fade <= 0.75 {
+                continue;
+            }
             out.push((
                 PickKey::new(handle.kind, object_id.min(0xFFFFF), handle.handle_id as u8),
                 vec![handle.entity],
@@ -123,15 +128,28 @@ impl EditorOverlay {
         out
     }
 
-    fn update_handle_visibility(&self, engine: &mut Engine) {
-        for handle in &self.handles {
-            let visible = self.params.visible && self.is_handle_mode_visible(handle.handle_id);
+    fn update_handle_visibility(&mut self, engine: &mut Engine) {
+        let active_mode_mask = match self.params.mode {
+            MODE_TRANSLATE => 0b001,
+            MODE_ROTATE => 0b010,
+            MODE_SCALE => 0b100,
+            _ => 0,
+        };
+        let camera_forward = self.params.camera_forward;
+        for handle in &mut self.handles {
+            let fade = Self::handle_fade_factor_for(camera_forward, handle.handle_id);
+            let mode_visible = (handle.mode_mask & active_mode_mask) != 0;
+            let visible = self.params.visible
+                && mode_visible
+                && fade > 0.001;
             let value = if visible {
                 self.layer_overlay_value
             } else {
                 self.layer_hidden_value
             };
             engine.renderable_set_layer_mask(handle.entity, 0xFF, value);
+            let rgba = [1.0, 1.0, 1.0, (handle.base_alpha * fade).clamp(0.0, 1.0)];
+            handle.material_instance.set_float4("tint", rgba);
         }
     }
 
@@ -187,8 +205,10 @@ impl EditorOverlay {
         base_rotation: Mat3,
         billboard_to_camera: bool,
         pickable: bool,
+        base_alpha: f32,
     ) -> Option<HandleEntity> {
         let mut mi = material.create_instance()?;
+        mi.set_float4("tint", [1.0, 1.0, 1.0, base_alpha.clamp(0.0, 1.0)]);
         let entity = entity_manager.create();
         let builder: RenderableBuilder = engine
             .renderable_builder(1)
@@ -208,8 +228,9 @@ impl EditorOverlay {
             base_rotation,
             billboard_to_camera,
             pickable,
+            base_alpha,
             _mesh: mesh,
-            _material_instance: mi,
+            material_instance: mi,
         })
     }
 
@@ -221,19 +242,19 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let axis_mesh_x = create_box_mesh(engine, [0.5, 0.0, 0.0], [1.0, 0.03, 0.03], [255, 80, 80, 255]);
-        let axis_mesh_y = create_box_mesh(engine, [0.0, 0.5, 0.0], [0.03, 1.0, 0.03], [80, 255, 80, 255]);
-        let axis_mesh_z = create_box_mesh(engine, [0.0, 0.0, 0.5], [0.03, 0.03, 1.0], [80, 160, 255, 255]);
+        let axis_mesh_x = create_box_mesh(engine, [0.5, 0.0, 0.0], [1.0, 0.02, 0.02], [255, 80, 80, 255]);
+        let axis_mesh_y = create_box_mesh(engine, [0.0, 0.5, 0.0], [0.02, 1.0, 0.02], [80, 255, 80, 255]);
+        let axis_mesh_z = create_box_mesh(engine, [0.0, 0.0, 0.5], [0.02, 0.02, 1.0], [80, 160, 255, 255]);
         let data = [
-            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, axis_mesh_x),
-            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, axis_mesh_y),
-            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, axis_mesh_z),
-            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, create_box_mesh(engine, [0.5, 0.0, 0.0], [1.0, 0.03, 0.03], [255, 80, 80, 255])),
-            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, create_box_mesh(engine, [0.0, 0.5, 0.0], [0.03, 1.0, 0.03], [80, 255, 80, 255])),
-            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, create_box_mesh(engine, [0.0, 0.0, 0.5], [0.03, 0.03, 1.0], [80, 160, 255, 255])),
+            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, 1.0, axis_mesh_x),
+            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, 1.0, axis_mesh_y),
+            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, Mat3::IDENTITY, false, true, 1.0, axis_mesh_z),
+            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, 1.0, create_box_mesh(engine, [0.5, 0.0, 0.0], [1.0, 0.02, 0.02], [255, 80, 80, 255])),
+            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, 1.0, create_box_mesh(engine, [0.0, 0.5, 0.0], [0.02, 1.0, 0.02], [80, 255, 80, 255])),
+            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, Mat3::IDENTITY, false, true, 1.0, create_box_mesh(engine, [0.0, 0.0, 0.5], [0.02, 0.02, 1.0], [80, 160, 255, 255])),
         ];
-        for (id, kind, mask, rot, bb, pickable, mesh) in data {
-            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable) {
+        for (id, kind, mask, rot, bb, pickable, base_alpha, mesh) in data {
+            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable, base_alpha) {
                 out.push(h);
             }
         }
@@ -249,18 +270,18 @@ impl EditorOverlay {
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
         let mut add = |id, color: [u8; 4], mode| {
-            (id, PickKind::GizmoPlane, mode, Mat3::IDENTITY, false, true, create_quad_mesh(engine, [0.22, 0.22, 0.0], [0.24, 0.24], color))
+            (id, PickKind::GizmoPlane, mode, Mat3::IDENTITY, false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], color))
         };
         let specs = [
             add(GIZMO_TRANSLATE_XY, [255, 255, 80, 180], 0b001),
             add(GIZMO_SCALE_XY, [255, 255, 80, 180], 0b100),
-            (GIZMO_TRANSLATE_XZ, PickKind::GizmoPlane, 0b001, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2), false, true, create_quad_mesh(engine, [0.22, 0.0, 0.22], [0.24, 0.24], [255, 120, 80, 180])),
-            (GIZMO_SCALE_XZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2), false, true, create_quad_mesh(engine, [0.22, 0.0, 0.22], [0.24, 0.24], [255, 120, 80, 180])),
-            (GIZMO_TRANSLATE_YZ, PickKind::GizmoPlane, 0b001, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2), false, true, create_quad_mesh(engine, [0.0, 0.22, 0.22], [0.24, 0.24], [80, 255, 255, 180])),
-            (GIZMO_SCALE_YZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2), false, true, create_quad_mesh(engine, [0.0, 0.22, 0.22], [0.24, 0.24], [80, 255, 255, 180])),
+            (GIZMO_TRANSLATE_XZ, PickKind::GizmoPlane, 0b001, Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [255, 120, 80, 180])),
+            (GIZMO_SCALE_XZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [255, 120, 80, 180])),
+            (GIZMO_TRANSLATE_YZ, PickKind::GizmoPlane, 0b001, Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180])),
+            (GIZMO_SCALE_YZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180])),
         ];
-        for (id, kind, mask, rot, bb, pickable, mesh) in specs {
-            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable) {
+        for (id, kind, mask, rot, bb, pickable, base_alpha, mesh) in specs {
+            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable, base_alpha) {
                 out.push(h);
             }
         }
@@ -275,19 +296,19 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let ring_x = create_ring_mesh(engine, 1.10, 0.012, [255, 80, 80, 220], 64, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2));
-        let ring_y = create_ring_mesh(engine, 1.10, 0.012, [80, 255, 80, 220], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
-        let ring_z = create_ring_mesh(engine, 1.10, 0.012, [80, 160, 255, 220], 64, Mat3::IDENTITY);
-        let view_ring = create_ring_mesh(engine, 1.22, 0.01, [230, 230, 230, 200], 64, Mat3::IDENTITY);
-        let arcball_disk = create_disk_mesh(engine, 0.86, [255, 255, 255, 28], 48);
+        let ring_x = create_ring_mesh(engine, 1.10, 0.008, [255, 80, 80, 220], 64, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let ring_y = create_ring_mesh(engine, 1.10, 0.008, [80, 255, 80, 220], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
+        let ring_z = create_ring_mesh(engine, 1.10, 0.008, [80, 160, 255, 220], 64, Mat3::IDENTITY);
+        let view_ring = create_ring_mesh(engine, 1.22, 0.007, [230, 230, 230, 200], 64, Mat3::IDENTITY);
+        let arcball_disk = create_disk_mesh(engine, 1.03, [255, 255, 255, 28], 48);
         let specs = [
-            (GIZMO_ROTATE_X, PickKind::GizmoRing, 0b010, false, true, ring_x),
-            (GIZMO_ROTATE_Y, PickKind::GizmoRing, 0b010, false, true, ring_y),
-            (GIZMO_ROTATE_Z, PickKind::GizmoRing, 0b010, false, true, ring_z),
-            (GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, view_ring),
-            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, arcball_disk),
+            (GIZMO_ROTATE_X, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_x),
+            (GIZMO_ROTATE_Y, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_y),
+            (GIZMO_ROTATE_Z, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_z),
+            (GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, 1.0, view_ring),
+            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, 0.6, arcball_disk),
         ];
-        for (id, kind, mask, billboard, pickable, mesh) in specs {
+        for (id, kind, mask, billboard, pickable, base_alpha, mesh) in specs {
             if let Some(h) = Self::add_handle(
                 engine,
                 scene,
@@ -301,6 +322,7 @@ impl EditorOverlay {
                 Mat3::IDENTITY,
                 billboard,
                 pickable,
+                base_alpha,
             ) {
                 out.push(h);
             }
@@ -316,7 +338,14 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let mesh = create_box_mesh(engine, [0.0, 0.0, 0.0], [0.10, 0.10, 0.10], [245, 245, 245, 220]);
+        let mesh = create_ring_mesh(
+            engine,
+            1.28,
+            0.009,
+            [245, 245, 245, 210],
+            64,
+            Mat3::IDENTITY,
+        );
         if let Some(h) = Self::add_handle(
             engine,
             scene,
@@ -328,12 +357,63 @@ impl EditorOverlay {
             PickKind::GizmoRing,
             0b100,
             Mat3::IDENTITY,
-            false,
             true,
+            true,
+            1.0,
         ) {
             out.push(h);
         }
         out
+    }
+
+    fn handle_fade_factor(&self, handle_id: i32) -> f32 {
+        Self::handle_fade_factor_for(self.params.camera_forward, handle_id)
+    }
+
+    fn handle_fade_factor_for(camera_forward: [f32; 3], handle_id: i32) -> f32 {
+        let view_dir = Vec3::from_array(camera_forward).normalize_or_zero();
+        if view_dir.length_squared() <= 1e-8 {
+            return 1.0;
+        }
+        let start_dot = 20.0f32.to_radians().cos();
+        let end_dot = 10.0f32.to_radians().cos();
+        let fade_from_dot = |dot_abs: f32| -> f32 {
+            if dot_abs <= start_dot {
+                1.0
+            } else if dot_abs >= end_dot {
+                0.0
+            } else {
+                1.0 - ((dot_abs - start_dot) / (end_dot - start_dot))
+            }
+        };
+
+        if let Some(axis) = Self::handle_axis(handle_id) {
+            let dot_abs = view_dir.dot(axis).abs();
+            return fade_from_dot(dot_abs);
+        }
+        if let Some((axis_a, axis_b)) = Self::handle_plane_axes(handle_id) {
+            let max_dot = view_dir.dot(axis_a).abs().max(view_dir.dot(axis_b).abs());
+            return fade_from_dot(max_dot);
+        }
+        1.0
+    }
+
+    fn handle_axis(handle_id: i32) -> Option<Vec3> {
+        match handle_id {
+            GIZMO_TRANSLATE_X | GIZMO_SCALE_X | GIZMO_ROTATE_X => Some(Vec3::X),
+            GIZMO_TRANSLATE_Y | GIZMO_SCALE_Y | GIZMO_ROTATE_Y => Some(Vec3::Y),
+            GIZMO_TRANSLATE_Z | GIZMO_SCALE_Z | GIZMO_ROTATE_Z => Some(Vec3::Z),
+            _ => None,
+        }
+    }
+
+    fn handle_plane_axes(handle_id: i32) -> Option<(Vec3, Vec3)> {
+        match handle_id {
+            GIZMO_TRANSLATE_XY | GIZMO_SCALE_XY => Some((Vec3::X, Vec3::Y)),
+            GIZMO_TRANSLATE_XZ | GIZMO_SCALE_XZ => Some((Vec3::X, Vec3::Z)),
+            GIZMO_TRANSLATE_YZ | GIZMO_SCALE_YZ => Some((Vec3::Y, Vec3::Z)),
+            _ => None,
+        }
     }
 }
 

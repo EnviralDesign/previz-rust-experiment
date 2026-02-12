@@ -4,13 +4,17 @@ material {
         color
     ],
     shadingModel : unlit,
+    blending : transparent,
     culling : none,
-    featureLevel : 0
+    featureLevel : 0,
+    parameters : [
+        { type : float4, name : tint }
+    ]
 }
 
 fragment {
     void material(inout MaterialInputs material) {
         prepareMaterial(material);
-        material.baseColor = getColor();
+        material.baseColor = getColor() * materialParams.tint;
     }
 }

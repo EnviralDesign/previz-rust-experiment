@@ -17,7 +17,7 @@ use crate::filament::{
     Engine, Entity, Material, MaterialInstance, RenderTarget, Renderer,
     Texture, TextureInternalFormat, TextureUsage, View,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 
 // ========================================================================
@@ -157,6 +157,10 @@ struct SavedMaterials {
     entries: Vec<(i32, *mut c_void)>,
 }
 
+const LAYER_SCENE: u8 = 0x01;
+const LAYER_OVERLAY: u8 = 0x02;
+const LAYER_PICK: u8 = 0x04;
+
 // ========================================================================
 // PickSystem — manages the offscreen pick pass
 // ========================================================================
@@ -187,6 +191,8 @@ pub struct PickSystem {
     last_hit: Option<PickHit>,
     // Metadata for an in-flight GPU readback that must be decoded after flush.
     pending_readback: Option<(f32, f32, u32, u32)>,
+    // Valid packed pick keys staged for the latest pick pass.
+    staged_keys: HashSet<u32>,
 }
 
 impl PickSystem {
@@ -226,6 +232,7 @@ impl PickSystem {
             pending_pick: None,
             last_hit: None,
             pending_readback: None,
+            staged_keys: HashSet::new(),
         })
     }
 
@@ -322,17 +329,27 @@ impl PickSystem {
         pick_view: &View,
         pickable_entities: &[(PickKey, Vec<Entity>)],
     ) {
+        self.staged_keys.clear();
         // 1. Save and swap materials
         let mut saved: Vec<(Entity, SavedMaterials)> = Vec::new();
+        let mut layer_restore: Vec<(Entity, u8)> = Vec::new();
 
         for (key, entities) in pickable_entities {
             // Pre-bake the pick instance. We need the pick instance pointer
             // so that we can set it on each primitive.
             self.ensure_pick_instance(*key);
             let packed = u32::from_be_bytes(key.to_rgba());
+            self.staged_keys.insert(packed);
             let pick_mi = &self.pick_instances[&packed];
+            let restore_layer = match key.kind {
+                PickKind::SceneMesh => LAYER_SCENE,
+                PickKind::GizmoAxis | PickKind::GizmoPlane | PickKind::GizmoRing => LAYER_OVERLAY,
+                _ => LAYER_SCENE,
+            };
 
             for &entity in entities {
+                engine.renderable_set_layer_mask(entity, 0xFF, LAYER_PICK);
+                layer_restore.push((entity, restore_layer));
                 let prim_count = engine.renderable_primitive_count(entity);
                 let mut entries = Vec::with_capacity(prim_count as usize);
                 for p in 0..prim_count {
@@ -351,6 +368,9 @@ impl PickSystem {
             for &(prim_idx, raw_ptr) in &saved_mats.entries {
                 engine.renderable_restore_material_raw(*entity, prim_idx, raw_ptr);
             }
+        }
+        for (entity, restore_layer) in &layer_restore {
+            engine.renderable_set_layer_mask(*entity, 0xFF, *restore_layer);
         }
     }
 
@@ -382,7 +402,7 @@ impl PickSystem {
             // Buffer is filled asynchronously by Filament; decode only after flush.
             self.pending_readback = Some((sx, sy, px, py_flipped));
         } else {
-            log::info!("readback FAILED at ({},{})", px, py_flipped);
+            log::warn!("Pick readback failed at ({},{})", px, py_flipped);
             self.last_hit = Some(PickHit::none());
         }
 
@@ -401,6 +421,11 @@ impl PickSystem {
             self.readback_buffer[3],
         ];
         let key = PickKey::from_rgba(rgba);
+        let packed = u32::from_be_bytes(rgba);
+        if !self.staged_keys.contains(&packed) {
+            self.last_hit = Some(PickHit::none());
+            return;
+        }
         self.last_hit = Some(PickHit {
             key,
             screen_x: sx,

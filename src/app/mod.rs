@@ -1013,6 +1013,7 @@ impl App {
         let mut pending_update_environment_command: Option<SceneCommand> = None;
         let mut pending_set_material_command: Option<SceneCommand> = None;
         let mut pick_hit: Option<crate::render::PickHit> = None;
+        let has_active_selection = self.current_selection_index().is_some();
         let (mut hdr_path_string, mut ibl_path_string, mut skybox_path_string) = {
             let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
@@ -1042,29 +1043,39 @@ impl App {
 
                 // GPU pick pass — execute before the beauty pass
                 if render.has_pick_system() {
-                    let pickable_entities: Vec<(crate::render::PickKey, Vec<crate::filament::Entity>)> = self
-                        .scene
-                        .objects()
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, obj)| {
-                            if let SceneObjectKind::Asset(_) = &obj.kind {
-                                let loaded = self.assets.loaded_assets().iter().find(|a| {
-                                    self.scene_runtime.get(index)
-                                        .and_then(|rt| rt.root_entity)
-                                        .map_or(false, |re| re == a.root_entity)
-                                });
-                                loaded.map(|a| {
-                                    (
-                                        crate::render::PickKey::scene_mesh(index as u32),
-                                        a.renderable_entities.clone(),
-                                    )
+                    // In transform modes with an active selection, stage only overlay keys so
+                    // gizmo handles are not occluded by scene mesh hits.
+                    let include_scene_keys = !matches!(
+                        self.transform_tool_mode,
+                        TransformToolMode::Translate | TransformToolMode::Rotate | TransformToolMode::Scale
+                    ) || !has_active_selection;
+                    let pickable_entities: Vec<(crate::render::PickKey, Vec<crate::filament::Entity>)> =
+                        if include_scene_keys {
+                            self.scene
+                                .objects()
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, obj)| {
+                                    if let SceneObjectKind::Asset(_) = &obj.kind {
+                                        let loaded = self.assets.loaded_assets().iter().find(|a| {
+                                            self.scene_runtime.get(index)
+                                                .and_then(|rt| rt.root_entity)
+                                                .map_or(false, |re| re == a.root_entity)
+                                        });
+                                        loaded.map(|a| {
+                                            (
+                                                crate::render::PickKey::scene_mesh(index as u32),
+                                                a.renderable_entities.clone(),
+                                            )
+                                        })
+                                    } else {
+                                        None
+                                    }
                                 })
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                     render.execute_pick_pass(&pickable_entities);
                 }
 
@@ -1135,7 +1146,6 @@ impl App {
         // Process GPU pick result (outside borrow scope)
         if let Some(hit) = pick_hit {
             if hit.is_none() {
-                log::info!("GPU pick: none");
                 if self.transform_tool_mode == TransformToolMode::Select {
                     selected_index = -1;
                 } else {
@@ -1143,7 +1153,6 @@ impl App {
                     gizmo_active_axis = GIZMO_NONE;
                 }
             } else if hit.key.kind == crate::render::PickKind::SceneMesh {
-                log::info!("GPU pick: SceneMesh object_id={}", hit.key.object_id);
                 let index = hit.key.object_id as usize;
                 selected_index = i32::try_from(index).unwrap_or(-1);
                 self.gizmo_active_axis = GIZMO_NONE;
@@ -1154,12 +1163,20 @@ impl App {
                     | crate::render::PickKind::GizmoPlane
                     | crate::render::PickKind::GizmoRing
             ) {
-                log::info!(
-                    "GPU pick: {:?} sub_id={}",
-                    hit.key.kind, hit.key.sub_id
-                );
                 self.gizmo_active_axis = hit.key.sub_id as i32;
                 gizmo_active_axis = self.gizmo_active_axis;
+            }
+        }
+        // In transform modes, keep requesting pick while LMB is held until a handle is acquired.
+        // This smooths over one-frame misses when a new gizmo/handle becomes active.
+        if self.transform_tool_mode != TransformToolMode::Select
+            && self.mouse_buttons[0]
+            && self.gizmo_active_axis == GIZMO_NONE
+            && self.gizmo_drag_state.is_none()
+            && !self.mouse_over_sidebar_ui()
+        {
+            if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
+                render.request_pick(mx, my);
             }
         }
         if self.mouse_buttons[0] && self.gizmo_active_axis != GIZMO_NONE && self.gizmo_drag_state.is_none() {
@@ -3074,11 +3091,10 @@ impl ApplicationHandler for App {
                 let new_pos = (position.x as f32, position.y as f32);
                 let prev_pos = self.mouse_pos;
                 self.mouse_pos = Some(new_pos);
-                let mut ui_capture_mouse = false;
                 let over_sidebar_ui = self.mouse_over_sidebar_ui();
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(new_pos.0, new_pos.1);
-                    ui_capture_mouse = render.ui_want_capture_mouse();
+                    let _ = render.ui_want_capture_mouse();
                 }
                 if !over_sidebar_ui {
                     if self.mouse_buttons[0] && self.gizmo_active_axis != 0 {
@@ -3118,11 +3134,10 @@ impl ApplicationHandler for App {
                     if button_index >= 0 && (button_index as usize) < self.mouse_buttons.len() {
                         self.mouse_buttons[button_index as usize] = pressed;
                     }
-                    let mut ui_capture_mouse = false;
                     let over_sidebar_ui = self.mouse_over_sidebar_ui();
                     if let Some(render) = &mut self.render {
                         render.ui_mouse_button(button_index, pressed);
-                        ui_capture_mouse = render.ui_want_capture_mouse();
+                        let _ = render.ui_want_capture_mouse();
                     }
                     if !over_sidebar_ui {
                         match self.camera_control_profile {
@@ -3130,16 +3145,11 @@ impl ApplicationHandler for App {
                                 (MouseButton::Left, true) => {
                                     if self.transform_tool_mode == TransformToolMode::Select {
                                         self.pending_click_select = true;
-                                        log::info!("LMB down select: defer pick until release");
                                     } else {
                                         self.pending_click_select = false;
                                         if let (Some((mx, my)), Some(render)) =
                                             (self.mouse_pos, &mut self.render)
                                         {
-                                            log::info!(
-                                                "LMB down transform: request pick at ({:.1}, {:.1})",
-                                                mx, my
-                                            );
                                             render.request_pick(mx, my);
                                         }
                                     }
@@ -3147,10 +3157,6 @@ impl ApplicationHandler for App {
                                 (MouseButton::Left, false) => {
                                     if self.pending_click_select && self.gizmo_active_axis == 0 {
                                         if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
-                                            log::info!(
-                                                "LMB up select: request pick at ({:.1}, {:.1})",
-                                                mx, my
-                                            );
                                             render.request_pick(mx, my);
                                         }
                                     }

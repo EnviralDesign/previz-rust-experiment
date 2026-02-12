@@ -70,6 +70,7 @@ pub struct RenderContext {
 
 const LAYER_SCENE: u8 = 0x01;
 const LAYER_OVERLAY: u8 = 0x02;
+const LAYER_PICK: u8 = 0x04;
 
 impl RenderContext {
     pub fn new(window: &Window) -> Result<Self, RenderError> {
@@ -118,7 +119,7 @@ impl RenderContext {
             pv.set_camera(&mut camera);
             pv.set_viewport(0, 0, window_size.width, window_size.height);
             pv.set_post_processing_enabled(false);
-            pv.set_visible_layers(0xFF, LAYER_SCENE | LAYER_OVERLAY);
+            pv.set_visible_layers(0xFF, LAYER_PICK);
             if let Some(ps) = &pick_system {
                 pv.set_render_target(Some(ps.render_target()));
             }
