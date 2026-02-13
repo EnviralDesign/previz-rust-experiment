@@ -2,12 +2,15 @@ mod input;
 mod timing;
 
 use crate::assets::AssetManager;
-use crate::filament::Entity;
+use crate::filament::{
+    Entity, LightParams as FilamentLightParams, LightShadowOptions as FilamentLightShadowOptions,
+    LightType as FilamentLightType,
+};
 use crate::render::{CameraController, CameraMovement, RenderContext, RenderError};
 use crate::scene::{
-    compose_transform_matrix, DirectionalLightData, EnvironmentData, MaterialOverrideData,
-    MaterialTextureBindingData, MediaSourceKind, RuntimeObject, SceneObjectKind, SceneRuntime,
-    SceneState, TextureColorSpace,
+    compose_transform_matrix, DirectionalLightData, EnvironmentData, LightData, LightType,
+    MaterialOverrideData, MaterialTextureBindingData, MediaSourceKind, RuntimeObject,
+    SceneObjectKind, SceneRuntime, SceneState, TextureColorSpace,
 };
 use crate::ui::{MaterialParams, UiState, MATERIAL_TEXTURE_PARAMS};
 use glam::{EulerRot, Mat3, Vec2, Vec3};
@@ -32,13 +35,13 @@ enum SceneCommand {
     AddAsset {
         path: String,
     },
-    AddDirectionalLight {
+    AddLight {
         name: String,
-        data: DirectionalLightData,
+        data: LightData,
     },
-    UpdateDirectionalLight {
+    UpdateLight {
         index: usize,
-        data: DirectionalLightData,
+        data: LightData,
     },
     SetEnvironment {
         data: EnvironmentData,
@@ -94,6 +97,12 @@ enum TransformToolMode {
     Translate = 1,
     Rotate = 2,
     Scale = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickRequestKind {
+    Select,
+    HoverGizmo,
 }
 
 const GIZMO_NONE: i32 = 0;
@@ -168,8 +177,8 @@ enum CommandError {
     SceneObjectNotFound { index: usize },
     #[error("scene object at index {index} is not transformable")]
     SceneObjectNotTransformable { index: usize },
-    #[error("scene object at index {index} is not a directional light")]
-    SceneObjectNotDirectionalLight { index: usize },
+    #[error("scene object at index {index} is not a light")]
+    SceneObjectNotLight { index: usize },
     #[error("render entity manager unavailable")]
     RenderEntityManagerUnavailable,
     #[error("render transform manager unavailable")]
@@ -181,14 +190,24 @@ enum CommandError {
 #[derive(Debug, Clone)]
 struct HarnessConfig {
     import_path: String,
+    extra_import_paths: Vec<String>,
     screenshot_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
     settle_frames: u32,
     max_frames: u32,
     include_ui: bool,
     add_default_light: bool,
+    light_type: LightType,
+    light_cast_shadows: bool,
+    light_position: [f32; 3],
+    light_direction: [f32; 3],
+    light_range: f32,
+    light_spot_inner_deg: f32,
+    light_spot_outer_deg: f32,
+    light_intensity: f32,
     environment_preset: HarnessEnvironmentPreset,
     environment_hdr_path: Option<String>,
+    start_minimized: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -204,6 +223,7 @@ struct HarnessState {
     frame_count: u32,
     next_capture_frame: u32,
     screenshot_retry_count: u32,
+    restored_for_capture: bool,
     setup_attempted: bool,
     setup_success: bool,
     setup_error: Option<String>,
@@ -222,9 +242,15 @@ struct HarnessReport {
     setup_success: bool,
     setup_error: Option<String>,
     light_enabled: bool,
+    light_type: String,
+    light_cast_shadows: bool,
+    light_position: [f32; 3],
+    light_direction: [f32; 3],
     environment_preset: HarnessEnvironmentPreset,
     environment_hdr_path: Option<String>,
+    start_minimized: bool,
     import_path: String,
+    extra_import_paths: Vec<String>,
     frame_count: u32,
     import_success: bool,
     import_error: Option<String>,
@@ -241,6 +267,7 @@ impl HarnessState {
             frame_count: 0,
             next_capture_frame: settle_frames,
             screenshot_retry_count: 0,
+            restored_for_capture: false,
             setup_attempted: false,
             setup_success: false,
             setup_error: None,
@@ -260,9 +287,15 @@ impl HarnessState {
             setup_success: self.setup_success,
             setup_error: self.setup_error.clone(),
             light_enabled: self.config.add_default_light,
+            light_type: format!("{:?}", self.config.light_type),
+            light_cast_shadows: self.config.light_cast_shadows,
+            light_position: self.config.light_position,
+            light_direction: self.config.light_direction,
             environment_preset: self.config.environment_preset,
             environment_hdr_path: self.config.environment_hdr_path.clone(),
+            start_minimized: self.config.start_minimized,
             import_path: self.config.import_path.clone(),
+            extra_import_paths: self.config.extra_import_paths.clone(),
             frame_count: self.frame_count,
             import_success: self.import_success,
             import_error: self.import_error.clone(),
@@ -293,6 +326,7 @@ pub struct App {
     mouse_pos: Option<(f32, f32)>,
     mouse_buttons: [bool; 5],
     pending_click_select: bool,
+    pending_pick_request: Option<PickRequestKind>,
     camera_drag_mode: Option<CameraDragMode>,
     camera_control_profile: CameraControlProfile,
     transform_tool_mode: TransformToolMode,
@@ -341,6 +375,7 @@ impl App {
             mouse_pos: None,
             mouse_buttons: [false; 5],
             pending_click_select: false,
+            pending_pick_request: None,
             camera_drag_mode: None,
             camera_control_profile: CameraControlProfile::Blender,
             transform_tool_mode: TransformToolMode::Translate,
@@ -392,6 +427,18 @@ impl App {
         }
         self.target_frame_duration = target;
         self.next_frame_time = Instant::now() + self.target_frame_duration;
+    }
+
+    fn should_ignore_resize(&self, new_size: PhysicalSize<u32>) -> bool {
+        if new_size.width == 0 || new_size.height == 0 {
+            return true;
+        }
+        let harness_minimized = self
+            .harness
+            .as_ref()
+            .map(|harness| harness.config.start_minimized)
+            .unwrap_or(false);
+        harness_minimized && (new_size.width <= 1 || new_size.height <= 1)
     }
 
     fn mouse_over_sidebar_ui(&self) -> bool {
@@ -507,12 +554,16 @@ impl App {
         true
     }
 
-    fn selected_asset_transform(&self) -> Option<(usize, [f32; 3], [f32; 3], [f32; 3])> {
+    fn selected_transform(&self) -> Option<(usize, [f32; 3], [f32; 3], [f32; 3])> {
         let selected = self.current_selection_index()?;
         let object = self.scene.objects().get(selected)?;
         match &object.kind {
             SceneObjectKind::Asset(data) => {
                 Some((selected, data.position, data.rotation_deg, data.scale))
+            }
+            SceneObjectKind::Light(data) => Some((selected, data.position, data.rotation_deg, [1.0, 1.0, 1.0])),
+            SceneObjectKind::DirectionalLight(data) => {
+                Some((selected, [0.0, 0.0, 0.0], rotation_deg_from_direction(data.direction), [1.0, 1.0, 1.0]))
             }
             _ => None,
         }
@@ -668,8 +719,17 @@ impl App {
 
                     // Read the *current* rotation for incremental accumulation.
                     if let Some(object) = self.scene.objects().get(index) {
-                        if let SceneObjectKind::Asset(data) = &object.kind {
-                            rotation_deg = data.rotation_deg;
+                        match &object.kind {
+                            SceneObjectKind::Asset(data) => {
+                                rotation_deg = data.rotation_deg;
+                            }
+                            SceneObjectKind::Light(data) => {
+                                rotation_deg = data.rotation_deg;
+                            }
+                            SceneObjectKind::DirectionalLight(data) => {
+                                rotation_deg = rotation_deg_from_direction(data.direction);
+                            }
+                            SceneObjectKind::Environment(_) => {}
                         }
                     }
                     let start_mat = euler_deg_to_mat3(rotation_deg);
@@ -800,7 +860,7 @@ impl App {
             return;
         }
         let Some((_, start_position, start_rotation_deg, start_scale)) =
-            self.selected_asset_transform()
+            self.selected_transform()
         else {
             return;
         };
@@ -1014,29 +1074,80 @@ impl App {
         let mut light_settings = self.ui.light_settings();
         let mut environment_intensity = self.ui.environment_intensity();
         let mut selected_light_entity: Option<Entity> = None;
-        let mut original_asset_transform: Option<([f32; 3], [f32; 3], [f32; 3])> = None;
-        let mut original_light_data: Option<DirectionalLightData> = None;
+        let mut original_transform: Option<([f32; 3], [f32; 3], [f32; 3])> = None;
+        let mut original_light_data: Option<LightData> = None;
         let mut original_environment_data: Option<EnvironmentData> = None;
 
         if let Some(selected) =
             Self::normalize_selection(selected_index, self.scene.objects().len())
         {
             if let Some(object) = self.scene.objects().get(selected) {
-                can_edit_transform = matches!(object.kind, SceneObjectKind::Asset(_));
+                can_edit_transform = matches!(
+                    object.kind,
+                    SceneObjectKind::Asset(_)
+                        | SceneObjectKind::Light(_)
+                        | SceneObjectKind::DirectionalLight(_)
+                );
                 selected_kind = match &object.kind {
                     SceneObjectKind::Asset(data) => {
                         position = data.position;
                         rotation = data.rotation_deg;
                         scale = data.scale;
-                        original_asset_transform =
+                        original_transform =
                             Some((data.position, data.rotation_deg, data.scale));
                         0
                     }
-                    SceneObjectKind::DirectionalLight(data) => {
+                    SceneObjectKind::Light(data) => {
+                        position = data.position;
+                        rotation = data.rotation_deg;
+                        scale = [1.0, 1.0, 1.0];
+                        original_transform = Some((position, rotation, scale));
                         light_settings.color = data.color;
                         light_settings.intensity = data.intensity;
                         light_settings.direction = data.direction;
+                        light_settings.range = data.range;
+                        light_settings.spot_inner_deg = data.spot_inner_deg;
+                        light_settings.spot_outer_deg = data.spot_outer_deg;
+                        light_settings.sun_angular_radius_deg = data.sun_angular_radius_deg;
+                        light_settings.sun_halo_size = data.sun_halo_size;
+                        light_settings.sun_halo_falloff = data.sun_halo_falloff;
+                        light_settings.cast_shadows = data.shadow.cast_shadows;
+                        light_settings.shadow_map_size = data.shadow.map_size as i32;
+                        light_settings.shadow_cascades = data.shadow.cascades as i32;
+                        light_settings.shadow_far = data.shadow.shadow_far;
+                        light_settings.shadow_near_hint = data.shadow.near_hint;
+                        light_settings.shadow_far_hint = data.shadow.far_hint;
+                        light_settings.light_type = scene_light_type_to_ui(data.light_type);
                         original_light_data = Some(data.clone());
+                        selected_light_entity = self
+                            .scene_runtime
+                            .get(selected)
+                            .and_then(|runtime| runtime.root_entity);
+                        1
+                    }
+                    SceneObjectKind::DirectionalLight(data) => {
+                        let migrated = LightData::from_legacy_directional(data.clone());
+                        position = migrated.position;
+                        rotation = migrated.rotation_deg;
+                        scale = [1.0, 1.0, 1.0];
+                        original_transform = Some((position, rotation, scale));
+                        light_settings.color = migrated.color;
+                        light_settings.intensity = migrated.intensity;
+                        light_settings.direction = migrated.direction;
+                        light_settings.range = migrated.range;
+                        light_settings.spot_inner_deg = migrated.spot_inner_deg;
+                        light_settings.spot_outer_deg = migrated.spot_outer_deg;
+                        light_settings.sun_angular_radius_deg = migrated.sun_angular_radius_deg;
+                        light_settings.sun_halo_size = migrated.sun_halo_size;
+                        light_settings.sun_halo_falloff = migrated.sun_halo_falloff;
+                        light_settings.cast_shadows = migrated.shadow.cast_shadows;
+                        light_settings.shadow_map_size = migrated.shadow.map_size as i32;
+                        light_settings.shadow_cascades = migrated.shadow.cascades as i32;
+                        light_settings.shadow_far = migrated.shadow.shadow_far;
+                        light_settings.shadow_near_hint = migrated.shadow.near_hint;
+                        light_settings.shadow_far_hint = migrated.shadow.far_hint;
+                        light_settings.light_type = scene_light_type_to_ui(migrated.light_type);
+                        original_light_data = Some(migrated);
                         selected_light_entity = self
                             .scene_runtime
                             .get(selected)
@@ -1062,6 +1173,7 @@ impl App {
             if let Some(object) = self.scene.objects().get(selected) {
                 let world = match &object.kind {
                     SceneObjectKind::Asset(data) => data.position,
+                    SceneObjectKind::Light(data) => data.position,
                     SceneObjectKind::DirectionalLight(_) => [0.0, 0.0, 0.0],
                     SceneObjectKind::Environment(_) => self.orbit_pivot,
                 };
@@ -1090,6 +1202,32 @@ impl App {
                 }
             }
         }
+        let selected_for_helpers =
+            Self::normalize_selection(selected_index, self.scene.objects().len());
+        let light_helper_specs: Vec<crate::render::LightHelperSpec> = self
+            .scene
+            .objects()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, object)| {
+                let object_index = u32::try_from(index).ok()?;
+                let (light_type, position, direction) = match &object.kind {
+                    SceneObjectKind::Light(data) => (data.light_type, data.position, data.direction),
+                    SceneObjectKind::DirectionalLight(data) => {
+                        (LightType::Directional, [0.0, 0.0, 0.0], data.direction)
+                    }
+                    _ => return None,
+                };
+                Some(crate::render::LightHelperSpec {
+                    object_id: object.id,
+                    object_index,
+                    light_type,
+                    position,
+                    direction,
+                    selected: selected_for_helpers == Some(index),
+                })
+            })
+            .collect();
         let scoped_material_indices = scoped_material_indices_for_selection(
             &self.scene,
             &self.assets,
@@ -1127,7 +1265,7 @@ impl App {
         let mut environment_pick_ibl = false;
         let mut environment_pick_skybox = false;
         let mut create_gltf = false;
-        let mut create_light = false;
+        let mut create_light_kind = -1i32;
         let mut create_environment = false;
         let mut save_scene = false;
         let mut load_scene = false;
@@ -1141,9 +1279,9 @@ impl App {
             .map(|param| sanitize_cstring(param))
             .collect();
         let mut material_binding_sources = vec![0u8; MATERIAL_TEXTURE_PARAMS.len() * 260];
-        let mut material_binding_wrap_repeat_u = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
-        let mut material_binding_wrap_repeat_v = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
-        let mut material_binding_srgb = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
+        let mut material_binding_wrap_repeat_u = vec![1u8; MATERIAL_TEXTURE_PARAMS.len()];
+        let mut material_binding_wrap_repeat_v = vec![1u8; MATERIAL_TEXTURE_PARAMS.len()];
+        let mut material_binding_srgb = vec![1u8; MATERIAL_TEXTURE_PARAMS.len()];
         let mut material_binding_uv_offset = vec![0.0f32; MATERIAL_TEXTURE_PARAMS.len() * 2];
         let mut material_binding_uv_scale = vec![1.0f32; MATERIAL_TEXTURE_PARAMS.len() * 2];
         let mut material_binding_uv_rotation_deg = vec![0.0f32; MATERIAL_TEXTURE_PARAMS.len()];
@@ -1153,9 +1291,9 @@ impl App {
                 let start = row_index * 260;
                 let end = start + 260;
                 material_binding_sources[start..end].copy_from_slice(&row.source);
-                material_binding_wrap_repeat_u[row_index] = row.wrap_repeat_u;
-                material_binding_wrap_repeat_v[row_index] = row.wrap_repeat_v;
-                material_binding_srgb[row_index] = row.srgb;
+                material_binding_wrap_repeat_u[row_index] = if row.wrap_repeat_u { 1 } else { 0 };
+                material_binding_wrap_repeat_v[row_index] = if row.wrap_repeat_v { 1 } else { 0 };
+                material_binding_srgb[row_index] = if row.srgb { 1 } else { 0 };
                 material_binding_uv_offset[row_index * 2] = row.uv_offset[0];
                 material_binding_uv_offset[row_index * 2 + 1] = row.uv_offset[1];
                 material_binding_uv_scale[row_index * 2] = row.uv_scale[0];
@@ -1210,6 +1348,7 @@ impl App {
                     )
                     .and_then(|idx| u32::try_from(idx).ok()),
                 });
+                render.sync_light_helpers(&light_helper_specs, camera_world_xyz);
                 render.ui_mouse_pos(mx, my);
                 for (index, down) in self.mouse_buttons.iter().enumerate() {
                     render.ui_mouse_button(index as i32, *down);
@@ -1271,6 +1410,19 @@ impl App {
                     &mut light_settings.color,
                     &mut light_settings.intensity,
                     &mut light_settings.direction,
+                    &mut light_settings.light_type,
+                    &mut light_settings.range,
+                    &mut light_settings.spot_inner_deg,
+                    &mut light_settings.spot_outer_deg,
+                    &mut light_settings.sun_angular_radius_deg,
+                    &mut light_settings.sun_halo_size,
+                    &mut light_settings.sun_halo_falloff,
+                    &mut light_settings.cast_shadows,
+                    &mut light_settings.shadow_map_size,
+                    &mut light_settings.shadow_cascades,
+                    &mut light_settings.shadow_far,
+                    &mut light_settings.shadow_near_hint,
+                    &mut light_settings.shadow_far_hint,
                     &material_names,
                     &mut selected_material_index,
                     &mut material_params.base_color_rgba,
@@ -1298,7 +1450,7 @@ impl App {
                     &mut environment_apply,
                     &mut environment_generate,
                     &mut create_gltf,
-                    &mut create_light,
+                    &mut create_light_kind,
                     &mut create_environment,
                     &mut save_scene,
                     &mut load_scene,
@@ -1324,34 +1476,58 @@ impl App {
         };
         // Process GPU pick result (outside borrow scope)
         if let Some(hit) = pick_hit {
-            if hit.is_none() {
-                if self.transform_tool_mode == TransformToolMode::Select {
-                    selected_index = -1;
-                } else {
-                    if self.mouse_buttons[0] {
-                        self.gizmo_active_axis = GIZMO_NONE;
-                        gizmo_active_axis = GIZMO_NONE;
-                    } else {
+            let pick_request = self
+                .pending_pick_request
+                .take()
+                .unwrap_or(PickRequestKind::HoverGizmo);
+            match pick_request {
+                PickRequestKind::HoverGizmo => {
+                    if hit.is_none() {
                         self.gizmo_hover_axis = GIZMO_NONE;
+                    } else if matches!(
+                        hit.key.kind,
+                        crate::render::PickKind::GizmoAxis
+                            | crate::render::PickKind::GizmoPlane
+                            | crate::render::PickKind::GizmoRing
+                    ) {
+                        self.gizmo_hover_axis = hit.key.sub_id as i32;
                     }
                 }
-            } else if hit.key.kind == crate::render::PickKind::SceneMesh {
-                let index = hit.key.object_id as usize;
-                selected_index = i32::try_from(index).unwrap_or(-1);
-                self.gizmo_active_axis = GIZMO_NONE;
-                gizmo_active_axis = GIZMO_NONE;
-                self.gizmo_hover_axis = GIZMO_NONE;
-            } else if matches!(
-                hit.key.kind,
-                crate::render::PickKind::GizmoAxis
-                    | crate::render::PickKind::GizmoPlane
-                    | crate::render::PickKind::GizmoRing
-            ) {
-                if self.mouse_buttons[0] {
-                    self.gizmo_active_axis = hit.key.sub_id as i32;
-                    gizmo_active_axis = self.gizmo_active_axis;
-                } else {
-                    self.gizmo_hover_axis = hit.key.sub_id as i32;
+                PickRequestKind::Select => {
+                    if hit.is_none() {
+                        if self.transform_tool_mode == TransformToolMode::Select {
+                            selected_index = -1;
+                        } else if self.mouse_buttons[0] {
+                            self.gizmo_active_axis = GIZMO_NONE;
+                            gizmo_active_axis = GIZMO_NONE;
+                        } else {
+                            self.gizmo_hover_axis = GIZMO_NONE;
+                        }
+                    } else if hit.key.kind == crate::render::PickKind::SceneMesh {
+                        let index = hit.key.object_id as usize;
+                        selected_index = i32::try_from(index).unwrap_or(-1);
+                        self.gizmo_active_axis = GIZMO_NONE;
+                        gizmo_active_axis = GIZMO_NONE;
+                        self.gizmo_hover_axis = GIZMO_NONE;
+                    } else if hit.key.kind == crate::render::PickKind::LightHelper {
+                        let index = hit.key.object_id as usize;
+                        selected_index = i32::try_from(index).unwrap_or(-1);
+                        self.gizmo_active_axis = GIZMO_NONE;
+                        gizmo_active_axis = GIZMO_NONE;
+                        self.gizmo_hover_axis = GIZMO_NONE;
+                    } else if matches!(
+                        hit.key.kind,
+                        crate::render::PickKind::GizmoAxis
+                            | crate::render::PickKind::GizmoPlane
+                            | crate::render::PickKind::GizmoRing
+                    ) {
+                        if self.mouse_buttons[0] {
+                            self.gizmo_active_axis = hit.key.sub_id as i32;
+                            gizmo_active_axis = self.gizmo_active_axis;
+                        } else {
+                            self.gizmo_hover_axis = hit.key.sub_id as i32;
+                        }
+                    }
                 }
             }
         }
@@ -1364,6 +1540,7 @@ impl App {
         {
             if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
                 render.request_pick(mx, my);
+                self.pending_pick_request = Some(PickRequestKind::HoverGizmo);
             }
         } else if self.transform_tool_mode == TransformToolMode::Select || !has_active_selection {
             self.gizmo_hover_axis = GIZMO_NONE;
@@ -1398,9 +1575,9 @@ impl App {
                 let end = start + 260;
                 row.source
                     .copy_from_slice(&material_binding_sources[start..end]);
-                row.wrap_repeat_u = material_binding_wrap_repeat_u[row_index];
-                row.wrap_repeat_v = material_binding_wrap_repeat_v[row_index];
-                row.srgb = material_binding_srgb[row_index];
+                row.wrap_repeat_u = material_binding_wrap_repeat_u[row_index] != 0;
+                row.wrap_repeat_v = material_binding_wrap_repeat_v[row_index] != 0;
+                row.srgb = material_binding_srgb[row_index] != 0;
                 row.uv_offset = [
                     material_binding_uv_offset[row_index * 2],
                     material_binding_uv_offset[row_index * 2 + 1],
@@ -1413,12 +1590,20 @@ impl App {
             }
         }
         self.ui.set_environment_intensity(environment_intensity);
+        let previous_transform_mode = self.transform_tool_mode;
         self.transform_tool_mode = match transform_tool_mode {
             0 => TransformToolMode::Select,
             2 => TransformToolMode::Rotate,
             3 => TransformToolMode::Scale,
             _ => TransformToolMode::Translate,
         };
+        if self.transform_tool_mode != previous_transform_mode {
+            self.pending_pick_request = None;
+            self.gizmo_drag_state = None;
+            self.gizmo_hover_axis = GIZMO_NONE;
+            self.gizmo_active_axis = GIZMO_NONE;
+            gizmo_active_axis = GIZMO_NONE;
+        }
         self.gizmo_active_axis = gizmo_active_axis;
         let selected_runtime_entity = self
             .current_selection_index()
@@ -1439,18 +1624,14 @@ impl App {
         if let Some(render) = &mut self.render {
             render.set_selected_entity(selected_runtime_entity);
             if let Some(entity) = selected_light_entity {
-                render.set_light_entity(entity);
-                render.set_directional_light(
-                    light_settings.color,
-                    light_settings.intensity,
-                    light_settings.direction,
-                );
+                let live_light = light_settings_to_light_data(light_settings, position, rotation);
+                render.set_light(entity, scene_light_to_filament_params(&live_light));
             }
             if self.selection_id == previous_selection_id {
                 if let Some(selected) = current_selection_index {
                     if can_edit_transform {
                         if let Some((old_position, old_rotation, old_scale)) =
-                            original_asset_transform
+                            original_transform
                         {
                             if old_position != position
                                 || old_rotation != rotation
@@ -1467,17 +1648,12 @@ impl App {
                     }
 
                     if let Some(old_light) = &original_light_data {
-                        let new_light = DirectionalLightData {
-                            color: light_settings.color,
-                            intensity: light_settings.intensity,
-                            direction: light_settings.direction,
-                        };
+                        let new_light = light_settings_to_light_data(light_settings, position, rotation);
                         if old_light != &new_light {
-                            pending_update_light_command =
-                                Some(SceneCommand::UpdateDirectionalLight {
-                                    index: selected,
-                                    data: new_light,
-                                });
+                            pending_update_light_command = Some(SceneCommand::UpdateLight {
+                                index: selected,
+                                data: new_light,
+                            });
                         }
                     }
 
@@ -1535,7 +1711,7 @@ impl App {
         }
         if let Some(command) = pending_update_light_command {
             let result = self.execute_scene_command(command);
-            self.apply_command_feedback("Failed to update directional light", result);
+            self.apply_command_feedback("Failed to update light", result);
         }
         if let Some(command) = pending_update_environment_command {
             let result = self.execute_scene_command(command);
@@ -1660,8 +1836,8 @@ impl App {
         if create_gltf {
             self.handle_create_gltf_action();
         }
-        if create_light {
-            self.handle_create_light_action();
+        if create_light_kind >= 0 {
+            self.handle_create_light_action(create_light_kind);
         }
         if create_environment {
             let result = self.execute_scene_command(SceneCommand::SetEnvironment {
@@ -1720,18 +1896,23 @@ impl App {
             .map(|h| h.setup_success && !h.import_attempted)
             .unwrap_or(false);
         if should_attempt_import {
-            let import_path = self
-                .harness
-                .as_ref()
-                .map(|h| h.config.import_path.clone())
-                .unwrap_or_default();
-            let result = self.execute_scene_command(SceneCommand::AddAsset {
-                path: import_path.clone(),
-            });
-            let (success, error_message) = match result {
-                Ok(_) => (true, None),
-                Err(err) => (false, Some(err.to_string())),
-            };
+            let mut import_paths = Vec::new();
+            if let Some(harness) = &self.harness {
+                import_paths.push(harness.config.import_path.clone());
+                import_paths.extend(harness.config.extra_import_paths.iter().cloned());
+            }
+            let mut success = true;
+            let mut error_message: Option<String> = None;
+            for import_path in import_paths {
+                let result = self.execute_scene_command(SceneCommand::AddAsset {
+                    path: import_path.clone(),
+                });
+                if let Err(err) = result {
+                    success = false;
+                    error_message = Some(format!("failed importing '{}': {}", import_path, err));
+                    break;
+                }
+            }
             if let Some(harness) = &mut self.harness {
                 harness.import_attempted = true;
                 harness.import_success = success;
@@ -1753,6 +1934,29 @@ impl App {
                     && h.frame_count >= h.next_capture_frame
             })
             .unwrap_or(false);
+        let should_restore_for_capture = self
+            .harness
+            .as_ref()
+            .map(|h| {
+                h.import_success
+                    && h.config.start_minimized
+                    && h.config.screenshot_path.is_some()
+                    && !h.screenshot_attempted
+                    && !h.restored_for_capture
+                    && h.frame_count >= h.next_capture_frame
+            })
+            .unwrap_or(false);
+        if should_restore_for_capture {
+            if let Some(window) = self.window.as_ref() {
+                window.set_minimized(false);
+                window.request_redraw();
+            }
+            if let Some(harness) = &mut self.harness {
+                harness.restored_for_capture = true;
+                harness.next_capture_frame = harness.frame_count.saturating_add(12);
+            }
+            return;
+        }
         if should_capture {
             let (screenshot_path, include_ui) = self
                 .harness
@@ -1873,16 +2077,20 @@ impl App {
             .ok_or_else(|| "harness configuration unavailable".to_string())?;
 
         if config.add_default_light {
-            let result = self.execute_scene_command(SceneCommand::AddDirectionalLight {
-                name: "Harness Directional Light".to_string(),
-                data: DirectionalLightData {
-                    color: [1.0, 1.0, 1.0],
-                    intensity: 100_000.0,
-                    direction: [0.0, -1.0, -0.5],
-                },
+            let mut light = LightData::default_for(config.light_type);
+            light.intensity = config.light_intensity;
+            light.position = config.light_position;
+            light.direction = normalize_dir3(config.light_direction);
+            light.range = config.light_range;
+            light.spot_inner_deg = config.light_spot_inner_deg;
+            light.spot_outer_deg = config.light_spot_outer_deg;
+            light.shadow.cast_shadows = config.light_cast_shadows;
+            let result = self.execute_scene_command(SceneCommand::AddLight {
+                name: format!("Harness {}", config.light_type.name_prefix()),
+                data: light,
             });
             if let Err(err) = result {
-                return Err(format!("failed adding harness directional light: {}", err));
+                return Err(format!("failed adding harness light: {}", err));
             }
         }
 
@@ -1989,11 +2197,11 @@ impl App {
     ) -> Result<CommandOutcome, CommandError> {
         match command {
             SceneCommand::AddAsset { path } => self.command_add_asset(&path),
-            SceneCommand::AddDirectionalLight { name, data } => {
-                self.command_add_directional_light(&name, data)
+            SceneCommand::AddLight { name, data } => {
+                self.command_add_light(&name, data)
             }
-            SceneCommand::UpdateDirectionalLight { index, data } => {
-                self.command_update_directional_light(index, data)
+            SceneCommand::UpdateLight { index, data } => {
+                self.command_update_light(index, data)
             }
             SceneCommand::SetEnvironment {
                 data,
@@ -2090,10 +2298,10 @@ impl App {
         Ok(CommandOutcome::None)
     }
 
-    fn command_add_directional_light(
+    fn command_add_light(
         &mut self,
         name: &str,
-        data: DirectionalLightData,
+        data: LightData,
     ) -> Result<CommandOutcome, CommandError> {
         let Some(render) = &mut self.render else {
             return Err(CommandError::RenderNotInitialized);
@@ -2102,38 +2310,44 @@ impl App {
         let mut entity_manager = engine
             .entity_manager()
             .ok_or(CommandError::RenderEntityManagerUnavailable)?;
-        let light_entity = engine.create_directional_light(
-            &mut entity_manager,
-            data.color,
-            data.intensity,
-            data.direction,
-        );
+        let light_entity =
+            engine.create_light(&mut entity_manager, scene_light_to_filament_params(&data));
         scene.add_entity(light_entity);
-        self.scene.add_directional_light(name, data);
+        self.scene.add_light(name, data.clone());
         self.scene_runtime.push(RuntimeObject {
             root_entity: Some(light_entity),
-            center: [0.0, 0.0, 0.0],
+            center: data.position,
             extent: [0.0, 0.0, 0.0],
         });
-        render.set_light_entity(light_entity);
 
         Ok(CommandOutcome::None)
     }
 
-    fn command_update_directional_light(
+    fn command_update_light(
         &mut self,
         index: usize,
-        data: DirectionalLightData,
+        data: LightData,
     ) -> Result<CommandOutcome, CommandError> {
         let object = self
             .scene
             .object_mut(index)
             .ok_or(CommandError::SceneObjectNotFound { index })?;
         match &mut object.kind {
-            SceneObjectKind::DirectionalLight(existing) => {
+            SceneObjectKind::Light(existing) => {
                 *existing = data.clone();
             }
-            _ => return Err(CommandError::SceneObjectNotDirectionalLight { index }),
+            SceneObjectKind::DirectionalLight(existing) => {
+                *existing = DirectionalLightData {
+                    color: data.color,
+                    intensity: data.intensity,
+                    direction: data.direction,
+                };
+                object.kind = SceneObjectKind::Light(data.clone());
+            }
+            _ => return Err(CommandError::SceneObjectNotLight { index }),
+        }
+        if let Some(runtime) = self.scene_runtime.get_mut(index) {
+            runtime.center = data.position;
         }
 
         let Some(render) = &mut self.render else {
@@ -2144,9 +2358,8 @@ impl App {
             .get(index)
             .and_then(|runtime| runtime.root_entity)
         {
-            render.set_light_entity(light_entity);
+            render.set_light(light_entity, scene_light_to_filament_params(&data));
         }
-        render.set_directional_light(data.color, data.intensity, data.direction);
         Ok(CommandOutcome::None)
     }
 
@@ -2328,6 +2541,7 @@ impl App {
         rotation_deg: [f32; 3],
         scale: [f32; 3],
     ) -> Result<CommandOutcome, CommandError> {
+        let mut updated_light: Option<LightData> = None;
         let object = self
             .scene
             .object_mut(index)
@@ -2338,7 +2552,21 @@ impl App {
                 data.rotation_deg = rotation_deg;
                 data.scale = scale;
             }
-            _ => return Err(CommandError::SceneObjectNotTransformable { index }),
+            SceneObjectKind::Light(data) => {
+                data.position = position;
+                data.rotation_deg = rotation_deg;
+                if light_type_uses_direction(data.light_type) {
+                    data.direction = direction_from_rotation_deg(rotation_deg);
+                }
+                updated_light = Some(data.clone());
+            }
+            SceneObjectKind::DirectionalLight(data) => {
+                data.direction = direction_from_rotation_deg(rotation_deg);
+                updated_light = Some(LightData::from_legacy_directional(data.clone()));
+            }
+            SceneObjectKind::Environment(_) => {
+                return Err(CommandError::SceneObjectNotTransformable { index });
+            }
         }
 
         let Some(entity) = self
@@ -2358,9 +2586,16 @@ impl App {
         let Some(render) = &mut self.render else {
             return Err(CommandError::RenderNotInitialized);
         };
-        let matrix = compose_transform_matrix(position, rotation_deg, scale);
-        if !render.set_entity_transform(entity, matrix) {
-            return Err(CommandError::RenderTransformManagerUnavailable);
+        if let Some(light) = updated_light {
+            render.set_light(entity, scene_light_to_filament_params(&light));
+            if let Some(runtime) = self.scene_runtime.get_mut(index) {
+                runtime.center = light.position;
+            }
+        } else {
+            let matrix = compose_transform_matrix(position, rotation_deg, scale);
+            if !render.set_entity_transform(entity, matrix) {
+                return Err(CommandError::RenderTransformManagerUnavailable);
+            }
         }
         Ok(CommandOutcome::None)
     }
@@ -2369,7 +2604,26 @@ impl App {
         let Some(removed) = self.scene.remove_object(index) else {
             return Err(CommandError::SceneObjectNotFound { index });
         };
-        self.selection_id = None;
+        // Clear interaction state immediately so stale picks / handles do not survive scene rebuilds.
+        self.pending_pick_request = None;
+        self.gizmo_drag_state = None;
+        self.gizmo_hover_axis = GIZMO_NONE;
+        self.gizmo_active_axis = GIZMO_NONE;
+
+        // Keep editing flow stable by selecting a sensible remaining object, if any.
+        let fallback_selection = self
+            .scene
+            .objects()
+            .iter()
+            .position(|object| {
+                matches!(
+                    object.kind,
+                    SceneObjectKind::Asset(_)
+                        | SceneObjectKind::Light(_)
+                        | SceneObjectKind::DirectionalLight(_)
+                )
+            });
+        self.set_selection_from_index(fallback_selection);
         match self.rebuild_runtime_scene() {
             Ok(()) => Ok(CommandOutcome::Notice(CommandNotice {
                 severity: CommandSeverity::Info,
@@ -2427,16 +2681,14 @@ impl App {
         self.apply_command_feedback(&format!("Failed to load glTF {}", path_str), result);
     }
 
-    fn handle_create_light_action(&mut self) {
-        let result = self.execute_scene_command(SceneCommand::AddDirectionalLight {
-            name: "Directional Light".to_string(),
-            data: DirectionalLightData {
-                color: [1.0, 1.0, 1.0],
-                intensity: 100_000.0,
-                direction: [0.0, -1.0, -0.5],
-            },
+    fn handle_create_light_action(&mut self, ui_light_type: i32) {
+        let light_type = ui_light_type_to_scene_light_type(ui_light_type);
+        let name = self.next_light_name(light_type);
+        let result = self.execute_scene_command(SceneCommand::AddLight {
+            name,
+            data: LightData::default_for(light_type),
         });
-        self.apply_command_feedback("Failed to create directional light", result);
+        self.apply_command_feedback("Failed to create light", result);
     }
 
     fn handle_save_scene_action(&mut self) {
@@ -2462,10 +2714,36 @@ impl App {
         self.apply_command_feedback("Failed to load scene", result);
     }
 
+    fn next_light_name(&self, light_type: LightType) -> String {
+        let prefix = light_type.name_prefix();
+        let mut next_index = 1usize;
+        for object in self.scene.objects() {
+            if !matches!(
+                object.kind,
+                SceneObjectKind::Light(_) | SceneObjectKind::DirectionalLight(_)
+            ) {
+                continue;
+            }
+            if !object.name.starts_with(prefix) {
+                continue;
+            }
+            let suffix = object.name[prefix.len()..].trim();
+            if suffix.is_empty() {
+                next_index = next_index.max(2);
+                continue;
+            }
+            if let Ok(parsed) = suffix.parse::<usize>() {
+                next_index = next_index.max(parsed.saturating_add(1));
+            }
+        }
+        format!("{prefix} {next_index}")
+    }
+
     fn rebuild_runtime_scene(&mut self) -> Result<(), String> {
         let Some(render) = &mut self.render else {
             return Ok(());
         };
+        self.scene.migrate_legacy_light_objects();
         self.scene.ensure_object_ids();
 
         // Conservative teardown order for native resource safety:
@@ -2486,8 +2764,6 @@ impl App {
         let source_objects = self.scene.objects().to_vec();
         let mut runtime_objects = Vec::with_capacity(source_objects.len());
         let mut transforms_to_apply: Vec<(Entity, [f32; 16])> = Vec::new();
-        let mut first_asset_bounds: Option<([f32; 3], [f32; 3])> = None;
-        let mut active_light: Option<Entity> = None;
         let mut environment_data: Option<EnvironmentData> = None;
         let mut errors: Vec<String> = Vec::new();
 
@@ -2523,9 +2799,6 @@ impl App {
                                         data.scale,
                                     ),
                                 ));
-                                if first_asset_bounds.is_none() {
-                                    first_asset_bounds = Some((loaded.center, loaded.extent));
-                                }
                                 runtime_objects.push(RuntimeObject {
                                     root_entity: Some(loaded.root_entity),
                                     center: loaded.center,
@@ -2539,20 +2812,24 @@ impl App {
                             }
                         }
                     }
-                    SceneObjectKind::DirectionalLight(data) => {
-                        let light_entity = engine.create_directional_light(
-                            &mut entity_manager,
-                            data.color,
-                            data.intensity,
-                            data.direction,
-                        );
+                    SceneObjectKind::Light(data) => {
+                        let light_entity =
+                            engine.create_light(&mut entity_manager, scene_light_to_filament_params(&data));
                         scene.add_entity(light_entity);
-                        if active_light.is_none() {
-                            active_light = Some(light_entity);
-                        }
                         runtime_objects.push(RuntimeObject {
                             root_entity: Some(light_entity),
-                            center: [0.0, 0.0, 0.0],
+                            center: data.position,
+                            extent: [0.0, 0.0, 0.0],
+                        });
+                    }
+                    SceneObjectKind::DirectionalLight(data) => {
+                        let migrated = LightData::from_legacy_directional(data);
+                        let light_entity = engine
+                            .create_light(&mut entity_manager, scene_light_to_filament_params(&migrated));
+                        scene.add_entity(light_entity);
+                        runtime_objects.push(RuntimeObject {
+                            root_entity: Some(light_entity),
+                            center: migrated.position,
                             extent: [0.0, 0.0, 0.0],
                         });
                     }
@@ -2575,10 +2852,6 @@ impl App {
                 ));
             }
         }
-        if let Some(light_entity) = active_light {
-            render.set_light_entity(light_entity);
-        }
-
         if let Some(environment) = environment_data {
             let env_ok = render.set_environment(
                 &environment.ibl_path,
@@ -2597,12 +2870,6 @@ impl App {
             } else if !environment.ibl_path.is_empty() || !environment.skybox_path.is_empty() {
                 errors.push("Environment failed to load from scene file.".to_string());
             }
-        }
-
-        if let Some((center, extent)) = first_asset_bounds {
-            self.orbit_pivot = center;
-            self.camera = CameraController::from_bounds(center, extent);
-            self.camera.apply(render.camera_mut());
         }
 
         match format_rebuild_errors(&errors) {
@@ -2838,7 +3105,7 @@ fn format_rebuild_errors(errors: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{format_rebuild_errors, App, CommandError, SceneCommand};
-    use crate::scene::{MaterialTextureBindingData, MediaSourceKind, TextureColorSpace};
+    use crate::scene::{LightData, LightType, MaterialTextureBindingData, MediaSourceKind, TextureColorSpace};
 
     #[test]
     fn rebuild_error_format_empty_is_none() {
@@ -2907,6 +3174,27 @@ mod tests {
         assert_eq!(binding.object_id, 5);
         assert_eq!(binding.material_slot, 2);
         assert_eq!(binding.binding.texture_param, "normalMap");
+    }
+
+    #[test]
+    fn delete_light_resets_gizmo_state_and_keeps_fallback_selection() {
+        let mut app = App::new();
+        let asset_id = app.scene.reserve_object_id();
+        app.scene
+            .add_asset_with_id(asset_id, "Asset".to_string(), "assets/gltf/DamagedHelmet.gltf");
+        app.scene
+            .add_light("Point Light 1", LightData::default_for(LightType::Point));
+        app.set_selection_from_index(Some(1));
+        app.gizmo_active_axis = 3;
+        app.gizmo_hover_axis = 2;
+        app.pending_pick_request = Some(super::PickRequestKind::Select);
+
+        let result = app.command_delete_object(1);
+        assert!(result.is_ok());
+        assert_eq!(app.current_selection_index(), Some(0));
+        assert_eq!(app.gizmo_active_axis, super::GIZMO_NONE);
+        assert_eq!(app.gizmo_hover_axis, super::GIZMO_NONE);
+        assert!(app.pending_pick_request.is_none());
     }
 }
 
@@ -3445,12 +3733,142 @@ fn load_material_params(assets: &mut AssetManager, selected_index: i32) -> Optio
     Some(params)
 }
 
+fn scene_light_type_to_ui(light_type: LightType) -> i32 {
+    match light_type {
+        LightType::Directional => 0,
+        LightType::Sun => 1,
+        LightType::Point => 2,
+        LightType::Spot => 3,
+        LightType::FocusedSpot => 4,
+    }
+}
+
+fn ui_light_type_to_scene_light_type(ui_value: i32) -> LightType {
+    match ui_value {
+        1 => LightType::Sun,
+        2 => LightType::Point,
+        3 => LightType::Spot,
+        4 => LightType::FocusedSpot,
+        _ => LightType::Directional,
+    }
+}
+
+fn scene_light_type_to_filament(light_type: LightType) -> FilamentLightType {
+    match light_type {
+        LightType::Directional => FilamentLightType::Directional,
+        LightType::Sun => FilamentLightType::Sun,
+        LightType::Point => FilamentLightType::Point,
+        LightType::Spot => FilamentLightType::Spot,
+        LightType::FocusedSpot => FilamentLightType::FocusedSpot,
+    }
+}
+
+fn light_type_uses_direction(light_type: LightType) -> bool {
+    matches!(
+        light_type,
+        LightType::Directional | LightType::Sun | LightType::Spot | LightType::FocusedSpot
+    )
+}
+
+fn scene_light_to_filament_params(light: &LightData) -> FilamentLightParams {
+    FilamentLightParams {
+        light_type: scene_light_type_to_filament(light.light_type),
+        color: light.color,
+        intensity: light.intensity,
+        position: light.position,
+        direction: normalize_dir3(light.direction),
+        range: light.range.max(0.01),
+        spot_inner_deg: light.spot_inner_deg.max(0.5),
+        spot_outer_deg: light.spot_outer_deg.max(light.spot_inner_deg.max(0.5)),
+        sun_angular_radius_deg: light.sun_angular_radius_deg.max(0.01),
+        sun_halo_size: light.sun_halo_size.max(0.0),
+        sun_halo_falloff: light.sun_halo_falloff.max(0.0),
+        shadow: FilamentLightShadowOptions {
+            cast_shadows: light.shadow.cast_shadows,
+            map_size: light.shadow.map_size.max(8),
+            cascades: light.shadow.cascades.clamp(1, 4),
+            shadow_far: light.shadow.shadow_far.max(0.0),
+            near_hint: light.shadow.near_hint.max(0.0),
+            far_hint: light.shadow.far_hint.max(light.shadow.near_hint.max(0.0)),
+        },
+    }
+}
+
+fn light_settings_to_light_data(
+    settings: crate::ui::LightSettings,
+    position: [f32; 3],
+    rotation_deg: [f32; 3],
+) -> LightData {
+    let light_type = ui_light_type_to_scene_light_type(settings.light_type);
+    let mut direction = normalize_dir3(settings.direction);
+    if light_type_uses_direction(light_type)
+        && (!direction[0].is_finite() || !direction[1].is_finite() || !direction[2].is_finite())
+    {
+        direction = direction_from_rotation_deg(rotation_deg);
+    }
+    let cast_shadows = if matches!(light_type, LightType::Point) {
+        false
+    } else {
+        settings.cast_shadows
+    };
+    LightData {
+        light_type,
+        color: settings.color,
+        intensity: settings.intensity,
+        position,
+        rotation_deg,
+        direction,
+        range: settings.range.max(0.01),
+        spot_inner_deg: settings.spot_inner_deg.max(0.5),
+        spot_outer_deg: settings.spot_outer_deg.max(settings.spot_inner_deg.max(0.5)),
+        sun_angular_radius_deg: settings.sun_angular_radius_deg.max(0.01),
+        sun_halo_size: settings.sun_halo_size.max(0.0),
+        sun_halo_falloff: settings.sun_halo_falloff.max(0.0),
+        shadow: crate::scene::LightShadowData {
+            cast_shadows,
+            map_size: (settings.shadow_map_size.max(8) as u32).next_power_of_two(),
+            cascades: settings.shadow_cascades.clamp(1, 4) as u8,
+            shadow_far: settings.shadow_far.max(0.0),
+            near_hint: settings.shadow_near_hint.max(0.0),
+            far_hint: settings
+                .shadow_far_hint
+                .max(settings.shadow_near_hint.max(0.0)),
+        },
+    }
+}
+
+fn normalize_dir3(dir: [f32; 3]) -> [f32; 3] {
+    let v = Vec3::from_array(dir);
+    if v.length_squared() <= 1e-10 {
+        return [0.0, -1.0, 0.0];
+    }
+    v.normalize().to_array()
+}
+
+fn direction_from_rotation_deg(rotation_deg: [f32; 3]) -> [f32; 3] {
+    let rotation = euler_deg_to_mat3(rotation_deg);
+    normalize_dir3((rotation * Vec3::NEG_Y).to_array())
+}
+
+fn rotation_deg_from_direction(direction: [f32; 3]) -> [f32; 3] {
+    let dir = Vec3::from_array(normalize_dir3(direction));
+    let yaw = dir.x.atan2(-dir.z);
+    let horiz = (dir.x * dir.x + dir.z * dir.z).sqrt().max(1e-6);
+    let pitch = (-dir.y).atan2(horiz) - std::f32::consts::FRAC_PI_2;
+    [pitch.to_degrees(), yaw.to_degrees(), 0.0]
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
 
+        let start_minimized = self
+            .harness
+            .as_ref()
+            .map(|harness| harness.config.start_minimized)
+            .unwrap_or(false);
         let window_attrs = WindowAttributes::default()
             .with_title("Previz - Filament v1.69.0 glTF")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32))
@@ -3470,7 +3888,6 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-
         if let Err(err) = self.init_filament(&window) {
             let message = format!("Failed to initialize renderer: {err}");
             log::error!("{message}");
@@ -3483,6 +3900,9 @@ impl ApplicationHandler for App {
             return;
         }
         self.update_target_frame_duration(&window);
+        if start_minimized {
+            window.set_minimized(true);
+        }
         self.window = Some(window);
     }
 
@@ -3581,6 +4001,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(new_size) => {
+                if self.should_ignore_resize(new_size) {
+                    return;
+                }
                 let scale_factor = self
                     .window
                     .as_ref()
@@ -3593,7 +4016,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(window) = self.window.as_ref() {
-                    self.handle_resize(window.inner_size(), scale_factor);
+                    let size = window.inner_size();
+                    if self.should_ignore_resize(size) {
+                        return;
+                    }
+                    self.handle_resize(size, scale_factor);
                 }
             }
             WindowEvent::Moved(_) => {
@@ -3606,11 +4033,12 @@ impl ApplicationHandler for App {
                 let prev_pos = self.mouse_pos;
                 self.mouse_pos = Some(new_pos);
                 let over_sidebar_ui = self.mouse_over_sidebar_ui();
+                let mut ui_capture_mouse = false;
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(new_pos.0, new_pos.1);
-                    let _ = render.ui_want_capture_mouse();
+                    ui_capture_mouse = render.ui_want_capture_mouse();
                 }
-                if !over_sidebar_ui {
+                if !(over_sidebar_ui || ui_capture_mouse) {
                     if self.mouse_buttons[0] && self.gizmo_active_axis != 0 {
                         self.begin_gizmo_drag_if_needed(new_pos);
                         self.apply_transform_tool_drag(new_pos);
@@ -3638,6 +4066,7 @@ impl ApplicationHandler for App {
                 self.gizmo_drag_state = None;
                 self.gizmo_hover_axis = GIZMO_NONE;
                 self.pending_click_select = false;
+                self.pending_pick_request = None;
                 if let Some(render) = &mut self.render {
                     render.ui_mouse_pos(-f32::MAX, -f32::MAX);
                 }
@@ -3649,11 +4078,12 @@ impl ApplicationHandler for App {
                         self.mouse_buttons[button_index as usize] = pressed;
                     }
                     let over_sidebar_ui = self.mouse_over_sidebar_ui();
+                    let mut ui_capture_mouse = false;
                     if let Some(render) = &mut self.render {
                         render.ui_mouse_button(button_index, pressed);
-                        let _ = render.ui_want_capture_mouse();
+                        ui_capture_mouse = render.ui_want_capture_mouse();
                     }
-                    if !over_sidebar_ui {
+                    if !(over_sidebar_ui || ui_capture_mouse) {
                         match self.camera_control_profile {
                             CameraControlProfile::Blender => match (button, pressed) {
                                 (MouseButton::Left, true) => {
@@ -3665,6 +4095,8 @@ impl ApplicationHandler for App {
                                             (self.mouse_pos, &mut self.render)
                                         {
                                             render.request_pick(mx, my);
+                                            self.pending_pick_request =
+                                                Some(PickRequestKind::Select);
                                         }
                                     }
                                 }
@@ -3674,6 +4106,8 @@ impl ApplicationHandler for App {
                                             (self.mouse_pos, &mut self.render)
                                         {
                                             render.request_pick(mx, my);
+                                            self.pending_pick_request =
+                                                Some(PickRequestKind::Select);
                                         }
                                     }
                                     self.pending_click_select = false;
@@ -3780,14 +4214,24 @@ fn build_harness_environment_data(
 
 fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
     let mut import_path: Option<String> = None;
+    let mut extra_import_paths: Vec<String> = Vec::new();
     let mut screenshot_path: Option<PathBuf> = None;
     let mut report_path: Option<PathBuf> = None;
     let mut settle_frames: u32 = 90;
     let mut max_frames: u32 = 1500;
     let mut include_ui = true;
     let mut add_default_light = true;
+    let mut light_type = LightType::Directional;
+    let mut light_cast_shadows = true;
+    let mut light_position = [0.0, 2.0, 2.0];
+    let mut light_direction = [0.0, -1.0, -0.5];
+    let mut light_range = 10.0f32;
+    let mut light_spot_inner_deg = 25.0f32;
+    let mut light_spot_outer_deg = 35.0f32;
+    let mut light_intensity = 100_000.0f32;
     let mut environment_preset = HarnessEnvironmentPreset::AdamsPlace;
     let mut environment_hdr_path: Option<String> = None;
+    let mut start_minimized = false;
     let mut saw_harness_flag = false;
 
     let mut args = std::env::args().skip(1);
@@ -3799,6 +4243,13 @@ fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
                     return Err("--harness-import requires a path value".to_string());
                 };
                 import_path = Some(value);
+            }
+            "--harness-import-extra" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-import-extra requires a path value".to_string());
+                };
+                extra_import_paths.push(value);
             }
             "--harness-screenshot" => {
                 saw_harness_flag = true;
@@ -3840,6 +4291,88 @@ fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
                 saw_harness_flag = true;
                 add_default_light = false;
             }
+            "--harness-light-type" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-type requires a value".to_string());
+                };
+                light_type = match value.to_ascii_lowercase().as_str() {
+                    "directional" => LightType::Directional,
+                    "sun" => LightType::Sun,
+                    "point" => LightType::Point,
+                    "spot" => LightType::Spot,
+                    "focused_spot" | "focusedspot" | "focused-spot" => LightType::FocusedSpot,
+                    _ => {
+                        return Err(
+                            "--harness-light-type must be one of: directional, sun, point, spot, focused_spot"
+                                .to_string(),
+                        );
+                    }
+                };
+            }
+            "--harness-light-shadows" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-shadows requires on/off".to_string());
+                };
+                light_cast_shadows = match value.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    _ => {
+                        return Err("--harness-light-shadows must be one of: on, off".to_string())
+                    }
+                };
+            }
+            "--harness-light-position" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-position requires x,y,z".to_string());
+                };
+                light_position = parse_vec3_arg(&value, "--harness-light-position")?;
+            }
+            "--harness-light-direction" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-direction requires x,y,z".to_string());
+                };
+                light_direction = parse_vec3_arg(&value, "--harness-light-direction")?;
+            }
+            "--harness-light-range" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-range requires a float".to_string());
+                };
+                light_range = value
+                    .parse::<f32>()
+                    .map_err(|_| "--harness-light-range must be a float".to_string())?;
+            }
+            "--harness-light-spot-inner" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-spot-inner requires a float".to_string());
+                };
+                light_spot_inner_deg = value
+                    .parse::<f32>()
+                    .map_err(|_| "--harness-light-spot-inner must be a float".to_string())?;
+            }
+            "--harness-light-spot-outer" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-spot-outer requires a float".to_string());
+                };
+                light_spot_outer_deg = value
+                    .parse::<f32>()
+                    .map_err(|_| "--harness-light-spot-outer must be a float".to_string())?;
+            }
+            "--harness-light-intensity" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-light-intensity requires a float".to_string());
+                };
+                light_intensity = value
+                    .parse::<f32>()
+                    .map_err(|_| "--harness-light-intensity must be a float".to_string())?;
+            }
             "--harness-env" => {
                 saw_harness_flag = true;
                 let Some(value) = args.next() else {
@@ -3865,6 +4398,10 @@ fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
                 };
                 environment_hdr_path = Some(value);
             }
+            "--harness-start-minimized" => {
+                saw_harness_flag = true;
+                start_minimized = true;
+            }
             _ => {}
         }
     }
@@ -3878,18 +4415,51 @@ fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
     if max_frames == 0 {
         return Err("--harness-max-frames must be greater than zero".to_string());
     }
+    if light_spot_outer_deg < light_spot_inner_deg {
+        light_spot_outer_deg = light_spot_inner_deg;
+    }
+    if matches!(light_type, LightType::Point) {
+        light_cast_shadows = false;
+    }
 
     Ok(Some(HarnessConfig {
         import_path,
+        extra_import_paths,
         screenshot_path,
         report_path,
         settle_frames,
         max_frames,
         include_ui,
         add_default_light,
+        light_type,
+        light_cast_shadows,
+        light_position,
+        light_direction,
+        light_range,
+        light_spot_inner_deg,
+        light_spot_outer_deg,
+        light_intensity,
         environment_preset,
         environment_hdr_path,
+        start_minimized,
     }))
+}
+
+fn parse_vec3_arg(value: &str, flag: &str) -> Result<[f32; 3], String> {
+    let parts: Vec<&str> = value.split(',').map(|part| part.trim()).collect();
+    if parts.len() != 3 {
+        return Err(format!("{flag} must be formatted as x,y,z"));
+    }
+    let x = parts[0]
+        .parse::<f32>()
+        .map_err(|_| format!("{flag} contains invalid x value"))?;
+    let y = parts[1]
+        .parse::<f32>()
+        .map_err(|_| format!("{flag} contains invalid y value"))?;
+    let z = parts[2]
+        .parse::<f32>()
+        .map_err(|_| format!("{flag} contains invalid z value"))?;
+    Ok([x, y, z])
 }
 
 pub fn run() {
@@ -3909,8 +4479,9 @@ pub fn run() {
     log::info!("   Press ESC or close window to exit");
     if let Some(config) = &harness_config {
         log::info!(
-            "Harness mode: import='{}' settle_frames={} max_frames={} screenshot={} ui={} light={} env={:?} env_hdr={}",
+            "Harness mode: import='{}' extras={} settle_frames={} max_frames={} screenshot={} ui={} minimized={} light={} type={:?} shadows={} env={:?} env_hdr={}",
             config.import_path,
+            config.extra_import_paths.len(),
             config.settle_frames,
             config.max_frames,
             config
@@ -3919,7 +4490,10 @@ pub fn run() {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "<disabled>".to_string()),
             if config.include_ui { "on" } else { "off" },
+            if config.start_minimized { "on" } else { "off" },
             if config.add_default_light { "on" } else { "off" },
+            config.light_type,
+            if config.light_cast_shadows { "on" } else { "off" },
             config.environment_preset,
             config.environment_hdr_path.as_deref().unwrap_or("<none>"),
         );

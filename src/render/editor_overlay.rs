@@ -1216,29 +1216,3 @@ fn write_segment_quad(
     positions[base + 3] = (b - offset_b).to_array();
     true
 }
-
-fn create_disk_mesh(
-    engine: &mut Engine,
-    radius: f32,
-    color: [u8; 4],
-    segments: usize,
-) -> MeshResource {
-    let n = segments.max(12);
-    let mut positions = Vec::with_capacity(n + 1);
-    let mut colors = Vec::with_capacity(n + 1);
-    let mut indices = Vec::with_capacity(n * 3);
-    positions.push([0.0, 0.0, 0.0]);
-    colors.push(color);
-    for i in 0..n {
-        let t = (i as f32 / n as f32) * std::f32::consts::TAU;
-        positions.push([radius * t.cos(), radius * t.sin(), 0.0]);
-        colors.push(color);
-    }
-    for i in 0..n {
-        let a = 0u16;
-        let b = (i + 1) as u16;
-        let c = if i + 1 == n { 1u16 } else { (i + 2) as u16 };
-        indices.extend_from_slice(&[a, b, c]);
-    }
-    create_mesh(engine, &positions, &colors, &indices).expect("disk mesh")
-}

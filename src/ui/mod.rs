@@ -53,9 +53,22 @@ pub struct UiState {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LightSettings {
+    pub light_type: i32,
     pub color: [f32; 3],
     pub intensity: f32,
     pub direction: [f32; 3],
+    pub range: f32,
+    pub spot_inner_deg: f32,
+    pub spot_outer_deg: f32,
+    pub sun_angular_radius_deg: f32,
+    pub sun_halo_size: f32,
+    pub sun_halo_falloff: f32,
+    pub cast_shadows: bool,
+    pub shadow_map_size: i32,
+    pub shadow_cascades: i32,
+    pub shadow_far: f32,
+    pub shadow_near_hint: f32,
+    pub shadow_far_hint: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,9 +86,22 @@ impl UiState {
             asset_summary: String::new(),
             selected_index: -1,
             light_settings: LightSettings {
+                light_type: 0,
                 color: [1.0, 1.0, 1.0],
                 intensity: 100_000.0,
                 direction: [0.0, -1.0, -0.5],
+                range: 10.0,
+                spot_inner_deg: 25.0,
+                spot_outer_deg: 35.0,
+                sun_angular_radius_deg: 0.545,
+                sun_halo_size: 10.0,
+                sun_halo_falloff: 80.0,
+                cast_shadows: true,
+                shadow_map_size: 1024,
+                shadow_cascades: 1,
+                shadow_far: 0.0,
+                shadow_near_hint: 1.0,
+                shadow_far_hint: 100.0,
             },
             selected_material_index: -1,
             material_params: MaterialParams {

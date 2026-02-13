@@ -343,7 +343,10 @@ impl PickSystem {
             let pick_mi = &self.pick_instances[&packed];
             let restore_layer = match key.kind {
                 PickKind::SceneMesh => LAYER_SCENE,
-                PickKind::GizmoAxis | PickKind::GizmoPlane | PickKind::GizmoRing => LAYER_OVERLAY,
+                PickKind::GizmoAxis
+                | PickKind::GizmoPlane
+                | PickKind::GizmoRing
+                | PickKind::LightHelper => LAYER_OVERLAY,
                 _ => LAYER_SCENE,
             };
 

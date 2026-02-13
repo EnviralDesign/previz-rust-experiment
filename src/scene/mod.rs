@@ -19,6 +19,115 @@ pub struct DirectionalLightData {
     pub direction: [f32; 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightType {
+    Directional,
+    Sun,
+    Point,
+    Spot,
+    FocusedSpot,
+}
+
+impl LightType {
+    pub fn name_prefix(self) -> &'static str {
+        match self {
+            Self::Directional => "Directional Light",
+            Self::Sun => "Sun Light",
+            Self::Point => "Point Light",
+            Self::Spot => "Spot Light",
+            Self::FocusedSpot => "Focused Spot Light",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LightShadowData {
+    #[serde(default = "default_true")]
+    pub cast_shadows: bool,
+    #[serde(default = "default_shadow_map_size")]
+    pub map_size: u32,
+    #[serde(default = "default_shadow_cascades")]
+    pub cascades: u8,
+    #[serde(default)]
+    pub shadow_far: f32,
+    #[serde(default = "default_shadow_near_hint")]
+    pub near_hint: f32,
+    #[serde(default = "default_shadow_far_hint")]
+    pub far_hint: f32,
+}
+
+impl Default for LightShadowData {
+    fn default() -> Self {
+        Self {
+            cast_shadows: true,
+            map_size: default_shadow_map_size(),
+            cascades: default_shadow_cascades(),
+            shadow_far: 0.0,
+            near_hint: default_shadow_near_hint(),
+            far_hint: default_shadow_far_hint(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LightData {
+    pub light_type: LightType,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    #[serde(default)]
+    pub position: [f32; 3],
+    #[serde(default)]
+    pub rotation_deg: [f32; 3],
+    pub direction: [f32; 3],
+    #[serde(default = "default_light_range")]
+    pub range: f32,
+    #[serde(default = "default_spot_inner_deg")]
+    pub spot_inner_deg: f32,
+    #[serde(default = "default_spot_outer_deg")]
+    pub spot_outer_deg: f32,
+    #[serde(default = "default_sun_angular_radius_deg")]
+    pub sun_angular_radius_deg: f32,
+    #[serde(default = "default_sun_halo_size")]
+    pub sun_halo_size: f32,
+    #[serde(default = "default_sun_halo_falloff")]
+    pub sun_halo_falloff: f32,
+    #[serde(default)]
+    pub shadow: LightShadowData,
+}
+
+impl LightData {
+    pub fn default_for(light_type: LightType) -> Self {
+        let mut data = Self {
+            light_type,
+            color: [1.0, 1.0, 1.0],
+            intensity: 100_000.0,
+            position: [0.0, 2.0, 2.0],
+            rotation_deg: [0.0, 0.0, 0.0],
+            direction: [0.0, -1.0, -0.5],
+            range: 10.0,
+            spot_inner_deg: 25.0,
+            spot_outer_deg: 35.0,
+            sun_angular_radius_deg: 0.545,
+            sun_halo_size: 10.0,
+            sun_halo_falloff: 80.0,
+            shadow: LightShadowData::default(),
+        };
+        if matches!(light_type, LightType::Point) {
+            data.shadow.cast_shadows = false;
+        }
+        data
+    }
+
+    pub fn from_legacy_directional(legacy: DirectionalLightData) -> Self {
+        let mut light = Self::default_for(LightType::Directional);
+        light.color = legacy.color;
+        light.intensity = legacy.intensity;
+        light.direction = legacy.direction;
+        light
+    }
+}
+
 /// Environment-specific data - matches what can be edited in UI
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EnvironmentData {
@@ -102,6 +211,8 @@ pub struct SceneObject {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SceneObjectKind {
     Asset(AssetData),
+    Light(LightData),
+    #[serde(alias = "LegacyDirectionalLight")]
     DirectionalLight(DirectionalLightData),
     Environment(EnvironmentData),
 }
@@ -131,6 +242,46 @@ fn default_texture_color_space() -> TextureColorSpace {
 
 fn default_uv_scale() -> [f32; 2] {
     [1.0, 1.0]
+}
+
+fn default_shadow_map_size() -> u32 {
+    1024
+}
+
+fn default_shadow_cascades() -> u8 {
+    1
+}
+
+fn default_shadow_near_hint() -> f32 {
+    1.0
+}
+
+fn default_shadow_far_hint() -> f32 {
+    100.0
+}
+
+fn default_light_range() -> f32 {
+    10.0
+}
+
+fn default_spot_inner_deg() -> f32 {
+    25.0
+}
+
+fn default_spot_outer_deg() -> f32 {
+    35.0
+}
+
+fn default_sun_angular_radius_deg() -> f32 {
+    0.545
+}
+
+fn default_sun_halo_size() -> f32 {
+    10.0
+}
+
+fn default_sun_halo_falloff() -> f32 {
+    80.0
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -167,6 +318,10 @@ impl SceneRuntime {
 
     pub fn get(&self, index: usize) -> Option<&RuntimeObject> {
         self.objects.get(index)
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut RuntimeObject> {
+        self.objects.get_mut(index)
     }
 
     pub fn replace(&mut self, objects: Vec<RuntimeObject>) {
@@ -290,13 +445,25 @@ impl SceneState {
         });
     }
 
-    pub fn add_directional_light(&mut self, name: &str, data: DirectionalLightData) {
+    pub fn add_light(&mut self, name: &str, data: LightData) {
         let id = self.reserve_object_id();
         self.objects.push(SceneObject {
             id,
             name: name.to_string(),
-            kind: SceneObjectKind::DirectionalLight(data),
+            kind: SceneObjectKind::Light(data),
         });
+    }
+
+    pub fn migrate_legacy_light_objects(&mut self) {
+        for object in &mut self.objects {
+            if let SceneObjectKind::DirectionalLight(legacy) = &object.kind {
+                let legacy_data = legacy.clone();
+                object.kind = SceneObjectKind::Light(LightData::from_legacy_directional(legacy_data));
+                if object.name.trim().is_empty() || object.name == "Light" {
+                    object.name = LightType::Directional.name_prefix().to_string();
+                }
+            }
+        }
     }
 
     pub fn set_environment(&mut self, data: EnvironmentData) {

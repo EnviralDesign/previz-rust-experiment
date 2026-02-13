@@ -84,6 +84,42 @@ pub enum VertexAttribute {
     Custom7 = 15,
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightType {
+    Directional = 0,
+    Sun = 1,
+    Point = 2,
+    Spot = 3,
+    FocusedSpot = 4,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LightShadowOptions {
+    pub cast_shadows: bool,
+    pub map_size: u32,
+    pub cascades: u8,
+    pub shadow_far: f32,
+    pub near_hint: f32,
+    pub far_hint: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LightParams {
+    pub light_type: LightType,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+    pub range: f32,
+    pub spot_inner_deg: f32,
+    pub spot_outer_deg: f32,
+    pub sun_angular_radius_deg: f32,
+    pub sun_halo_size: f32,
+    pub sun_halo_falloff: f32,
+    pub shadow: LightShadowOptions,
+}
+
 /// Index buffer type enum
 /// Values must match backend::ElementType
 #[repr(u8)]
@@ -182,49 +218,72 @@ impl Engine {
         }
     }
 
-    /// Create a directional light and return its entity
-    pub fn create_directional_light(
+    /// Create a light and return its entity.
+    pub fn create_light(
         &mut self,
         entity_manager: &mut EntityManager,
-        color: [f32; 3],
-        intensity: f32,
-        direction: [f32; 3],
+        params: LightParams,
     ) -> Entity {
         unsafe {
-            let id = ffi::filament_light_create_directional(
+            let id = ffi::filament_light_create(
                 self.ptr.as_ptr() as *mut _,
                 entity_manager.ptr.as_ptr() as *mut _,
-                color[0],
-                color[1],
-                color[2],
-                intensity,
-                direction[0],
-                direction[1],
-                direction[2],
+                params.light_type as u8,
+                params.color[0],
+                params.color[1],
+                params.color[2],
+                params.intensity,
+                params.position[0],
+                params.position[1],
+                params.position[2],
+                params.direction[0],
+                params.direction[1],
+                params.direction[2],
+                params.range,
+                params.spot_inner_deg,
+                params.spot_outer_deg,
+                params.sun_angular_radius_deg,
+                params.sun_halo_size,
+                params.sun_halo_falloff,
+                params.shadow.cast_shadows,
+                params.shadow.map_size,
+                params.shadow.cascades,
+                params.shadow.shadow_far,
+                params.shadow.near_hint,
+                params.shadow.far_hint,
             );
             Entity { id }
         }
     }
 
-    /// Update a directional light's parameters
-    pub fn set_directional_light(
-        &mut self,
-        entity: Entity,
-        color: [f32; 3],
-        intensity: f32,
-        direction: [f32; 3],
-    ) {
+    /// Update light parameters for an existing light entity.
+    pub fn set_light(&mut self, entity: Entity, params: LightParams) {
         unsafe {
-            ffi::filament_light_set_directional(
+            ffi::filament_light_set(
                 self.ptr.as_ptr() as *mut _,
                 entity.id,
-                color[0],
-                color[1],
-                color[2],
-                intensity,
-                direction[0],
-                direction[1],
-                direction[2],
+                params.color[0],
+                params.color[1],
+                params.color[2],
+                params.intensity,
+                params.position[0],
+                params.position[1],
+                params.position[2],
+                params.direction[0],
+                params.direction[1],
+                params.direction[2],
+                params.range,
+                params.spot_inner_deg,
+                params.spot_outer_deg,
+                params.sun_angular_radius_deg,
+                params.sun_halo_size,
+                params.sun_halo_falloff,
+                params.shadow.cast_shadows,
+                params.shadow.map_size,
+                params.shadow.cascades,
+                params.shadow.shadow_far,
+                params.shadow.near_hint,
+                params.shadow.far_hint,
             );
         }
     }
@@ -1361,6 +1420,19 @@ impl ImGuiHelper {
         light_color_rgb: &mut [f32; 3],
         light_intensity: &mut f32,
         light_dir_xyz: &mut [f32; 3],
+        light_type: &mut i32,
+        light_range: &mut f32,
+        light_spot_inner_deg: &mut f32,
+        light_spot_outer_deg: &mut f32,
+        light_sun_angular_radius_deg: &mut f32,
+        light_sun_halo_size: &mut f32,
+        light_sun_halo_falloff: &mut f32,
+        light_cast_shadows: &mut bool,
+        light_shadow_map_size: &mut i32,
+        light_shadow_cascades: &mut i32,
+        light_shadow_far: &mut f32,
+        light_shadow_near_hint: &mut f32,
+        light_shadow_far_hint: &mut f32,
         material_names: &[*const c_char],
         selected_material_index: &mut i32,
         material_base_color_rgba: &mut [f32; 4],
@@ -1370,9 +1442,9 @@ impl ImGuiHelper {
         material_binding_param_names: &[*const c_char],
         material_binding_sources: &mut [u8],
         material_binding_source_stride: i32,
-        material_binding_wrap_repeat_u: &mut [bool],
-        material_binding_wrap_repeat_v: &mut [bool],
-        material_binding_srgb: &mut [bool],
+        material_binding_wrap_repeat_u: &mut [u8],
+        material_binding_wrap_repeat_v: &mut [u8],
+        material_binding_srgb: &mut [u8],
         material_binding_uv_offset: &mut [f32],
         material_binding_uv_scale: &mut [f32],
         material_binding_uv_rotation_deg: &mut [f32],
@@ -1388,7 +1460,7 @@ impl ImGuiHelper {
         environment_apply: &mut bool,
         environment_generate: &mut bool,
         create_gltf: &mut bool,
-        create_light: &mut bool,
+        create_light_kind: &mut i32,
         create_environment: &mut bool,
         save_scene: &mut bool,
         load_scene: &mut bool,
@@ -1441,6 +1513,19 @@ impl ImGuiHelper {
                 light_color_rgb.as_mut_ptr(),
                 light_intensity as *mut f32,
                 light_dir_xyz.as_mut_ptr(),
+                light_type as *mut i32,
+                light_range as *mut f32,
+                light_spot_inner_deg as *mut f32,
+                light_spot_outer_deg as *mut f32,
+                light_sun_angular_radius_deg as *mut f32,
+                light_sun_halo_size as *mut f32,
+                light_sun_halo_falloff as *mut f32,
+                light_cast_shadows as *mut bool,
+                light_shadow_map_size as *mut i32,
+                light_shadow_cascades as *mut i32,
+                light_shadow_far as *mut f32,
+                light_shadow_near_hint as *mut f32,
+                light_shadow_far_hint as *mut f32,
                 material_ptr,
                 material_names.len() as i32,
                 selected_material_index as *mut i32,
@@ -1452,9 +1537,9 @@ impl ImGuiHelper {
                 material_binding_param_names.len() as i32,
                 material_binding_sources.as_mut_ptr() as *mut c_char,
                 material_binding_source_stride,
-                material_binding_wrap_repeat_u.as_mut_ptr(),
-                material_binding_wrap_repeat_v.as_mut_ptr(),
-                material_binding_srgb.as_mut_ptr(),
+                material_binding_wrap_repeat_u.as_mut_ptr() as *mut bool,
+                material_binding_wrap_repeat_v.as_mut_ptr() as *mut bool,
+                material_binding_srgb.as_mut_ptr() as *mut bool,
                 material_binding_uv_offset.as_mut_ptr(),
                 material_binding_uv_scale.as_mut_ptr(),
                 material_binding_uv_rotation_deg.as_mut_ptr(),
@@ -1473,7 +1558,7 @@ impl ImGuiHelper {
                 environment_apply as *mut bool,
                 environment_generate as *mut bool,
                 create_gltf as *mut bool,
-                create_light as *mut bool,
+                create_light_kind as *mut i32,
                 create_environment as *mut bool,
                 save_scene as *mut bool,
                 load_scene as *mut bool,

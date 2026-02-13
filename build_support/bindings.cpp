@@ -44,6 +44,7 @@
 #include <fstream>
 #include <vector>
 #include <atomic>
+#include <algorithm>
 
 using namespace filament;
 using namespace utils;
@@ -702,44 +703,118 @@ void filament_renderable_builder_build(RenderableBuilderWrapper* wrapper, Engine
 int32_t filament_light_create_directional(
     Engine* engine,
     EntityManager* em,
+    uint8_t light_type,
     float color_r,
     float color_g,
     float color_b,
     float intensity,
+    float pos_x,
+    float pos_y,
+    float pos_z,
     float dir_x,
     float dir_y,
-    float dir_z
+    float dir_z,
+    float range,
+    float spot_inner_deg,
+    float spot_outer_deg,
+    float sun_angular_radius_deg,
+    float sun_halo_size,
+    float sun_halo_falloff,
+    bool cast_shadows,
+    uint32_t shadow_map_size,
+    uint8_t shadow_cascades,
+    float shadow_far,
+    float shadow_near_hint,
+    float shadow_far_hint
 ) {
+    if (!engine || !em) {
+        return 0;
+    }
+    LightManager::Type type = filament_light_type_from_u8(light_type);
+    LightManager::ShadowOptions shadow_options = build_shadow_options(
+        shadow_map_size,
+        shadow_cascades,
+        shadow_far,
+        shadow_near_hint,
+        shadow_far_hint
+    );
+    constexpr float DEG_TO_RAD = 0.017453292519943295f;
+    float spot_inner_rad = std::max(0.5f, spot_inner_deg) * DEG_TO_RAD;
+    float spot_outer_rad = std::max(spot_inner_deg, spot_outer_deg) * DEG_TO_RAD;
+
     Entity entity = em->create();
-    LightManager::Builder(LightManager::Type::DIRECTIONAL)
+    LightManager::Builder(type)
         .color({color_r, color_g, color_b})
         .intensity(intensity)
+        .position({pos_x, pos_y, pos_z})
         .direction({dir_x, dir_y, dir_z})
-        .castShadows(true)
+        .falloff(std::max(0.01f, range))
+        .spotLightCone(spot_inner_rad, spot_outer_rad)
+        .sunAngularRadius(std::max(0.01f, sun_angular_radius_deg))
+        .sunHaloSize(std::max(0.0f, sun_halo_size))
+        .sunHaloFalloff(std::max(0.0f, sun_halo_falloff))
+        .castShadows(cast_shadows)
+        .shadowOptions(shadow_options)
         .build(*engine, entity);
     return Entity::smuggle(entity);
 }
 
-void filament_light_set_directional(
+void filament_light_set(
     Engine* engine,
     int32_t entity_id,
     float color_r,
     float color_g,
     float color_b,
     float intensity,
+    float pos_x,
+    float pos_y,
+    float pos_z,
     float dir_x,
     float dir_y,
-    float dir_z
+    float dir_z,
+    float range,
+    float spot_inner_deg,
+    float spot_outer_deg,
+    float sun_angular_radius_deg,
+    float sun_halo_size,
+    float sun_halo_falloff,
+    bool cast_shadows,
+    uint32_t shadow_map_size,
+    uint8_t shadow_cascades,
+    float shadow_far,
+    float shadow_near_hint,
+    float shadow_far_hint
 ) {
+    if (!engine) {
+        return;
+    }
     Entity entity = Entity::import(entity_id);
     auto& lm = engine->getLightManager();
     if (!lm.hasComponent(entity)) {
         return;
     }
     auto instance = lm.getInstance(entity);
+    LightManager::ShadowOptions shadow_options = build_shadow_options(
+        shadow_map_size,
+        shadow_cascades,
+        shadow_far,
+        shadow_near_hint,
+        shadow_far_hint
+    );
+    constexpr float DEG_TO_RAD = 0.017453292519943295f;
+    float spot_inner_rad = std::max(0.5f, spot_inner_deg) * DEG_TO_RAD;
+    float spot_outer_rad = std::max(spot_inner_deg, spot_outer_deg) * DEG_TO_RAD;
     lm.setColor(instance, {color_r, color_g, color_b});
     lm.setIntensity(instance, intensity);
+    lm.setPosition(instance, {pos_x, pos_y, pos_z});
     lm.setDirection(instance, {dir_x, dir_y, dir_z});
+    lm.setFalloff(instance, std::max(0.01f, range));
+    lm.setSpotLightCone(instance, spot_inner_rad, spot_outer_rad);
+    lm.setSunAngularRadius(instance, std::max(0.01f, sun_angular_radius_deg));
+    lm.setSunHaloSize(instance, std::max(0.0f, sun_halo_size));
+    lm.setSunHaloFalloff(instance, std::max(0.0f, sun_halo_falloff));
+    lm.setShadowCaster(instance, cast_shadows);
+    lm.setShadowOptions(instance, shadow_options);
 }
 
 // ============================================================================
@@ -1135,6 +1210,19 @@ void filagui_imgui_helper_render_scene_ui(
     float* light_color_rgb,
     float* light_intensity,
     float* light_dir_xyz,
+    int* light_type,
+    float* light_range,
+    float* light_spot_inner_deg,
+    float* light_spot_outer_deg,
+    float* light_sun_angular_radius_deg,
+    float* light_sun_halo_size,
+    float* light_sun_halo_falloff,
+    bool* light_cast_shadows,
+    int* light_shadow_map_size,
+    int* light_shadow_cascades,
+    float* light_shadow_far,
+    float* light_shadow_near_hint,
+    float* light_shadow_far_hint,
     const char** material_names,
     int material_count,
     int* selected_material_index,
@@ -1167,7 +1255,7 @@ void filagui_imgui_helper_render_scene_ui(
     bool* environment_apply,
     bool* environment_generate,
     bool* create_gltf,
-    bool* create_light,
+    int* create_light_kind,
     bool* create_environment,
     bool* save_scene,
     bool* load_scene,
@@ -1203,10 +1291,22 @@ void filagui_imgui_helper_render_scene_ui(
                     *create_gltf = true;
                 }
             }
-            if (create_light) {
-                *create_light = false;
-                if (ImGui::Button("Add Light", ImVec2(-1, 0))) {
-                    *create_light = true;
+            if (create_light_kind) {
+                *create_light_kind = -1;
+                if (ImGui::Button("Add Directional Light", ImVec2(-1, 0))) {
+                    *create_light_kind = 0;
+                }
+                if (ImGui::Button("Add Sun Light", ImVec2(-1, 0))) {
+                    *create_light_kind = 1;
+                }
+                if (ImGui::Button("Add Point Light", ImVec2(-1, 0))) {
+                    *create_light_kind = 2;
+                }
+                if (ImGui::Button("Add Spot Light", ImVec2(-1, 0))) {
+                    *create_light_kind = 3;
+                }
+                if (ImGui::Button("Add Focused Spot Light", ImVec2(-1, 0))) {
+                    *create_light_kind = 4;
                 }
             }
             if (create_environment) {
@@ -1311,7 +1411,7 @@ void filagui_imgui_helper_render_scene_ui(
             ImGui::Separator();
         }
 
-        bool show_transform = selected_kind && *selected_kind == 0;
+        bool show_transform = selected_kind && (*selected_kind == 0 || *selected_kind == 1);
         if (show_transform && ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
             bool has_selection = selected_index && *selected_index >= 0;
             bool allow_transform = has_selection && (!can_edit_transform || *can_edit_transform);
@@ -1324,8 +1424,15 @@ void filagui_imgui_helper_render_scene_ui(
             if (rotation_deg_xyz) {
                 ImGui::InputFloat3("Rotation (deg)", rotation_deg_xyz, "%.2f");
             }
+            bool is_light_transform = selected_kind && *selected_kind == 1;
+            if (is_light_transform) {
+                ImGui::BeginDisabled();
+            }
             if (scale_xyz) {
                 ImGui::InputFloat3("Scale", scale_xyz, "%.3f");
+            }
+            if (is_light_transform) {
+                ImGui::EndDisabled();
             }
             if (!allow_transform) {
                 ImGui::EndDisabled();
@@ -1334,6 +1441,21 @@ void filagui_imgui_helper_render_scene_ui(
 
         bool show_lighting = selected_kind && *selected_kind == 1;
         if (show_lighting && ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const char* light_type_names[] = {
+                "Directional",
+                "Sun",
+                "Point",
+                "Spot",
+                "Focused Spot"
+            };
+            int type_value = light_type ? *light_type : 0;
+            type_value = std::max(0, std::min(4, type_value));
+            if (light_type) {
+                ImGui::Combo("Type", light_type, light_type_names, IM_ARRAYSIZE(light_type_names));
+                type_value = std::max(0, std::min(4, *light_type));
+            } else {
+                ImGui::TextUnformatted(light_type_names[type_value]);
+            }
             if (light_color_rgb) {
                 ImGui::ColorEdit3("Color", light_color_rgb);
             }
@@ -1353,6 +1475,84 @@ void filagui_imgui_helper_render_scene_ui(
                         light_dir_xyz[1] = y / len;
                         light_dir_xyz[2] = z / len;
                     }
+                }
+            }
+            bool is_point = type_value == 2;
+            bool is_spot = type_value == 3 || type_value == 4;
+            bool is_focused_spot = type_value == 4;
+            bool is_sun = type_value == 1;
+            if (light_range) {
+                ImGui::SliderFloat("Range", light_range, 0.01f, 200.0f, "%.3f");
+            }
+            if (type_value == 0 || is_sun) {
+                ImGui::TextDisabled("Intensity unit: lux (illuminance).");
+            } else {
+                ImGui::TextDisabled("Intensity unit: lumen; range is cutoff distance.");
+            }
+            if (is_spot && !is_focused_spot) {
+                ImGui::TextDisabled("Spot: cone angle does not change brightness.");
+            }
+            if (is_focused_spot) {
+                ImGui::TextDisabled("Focused Spot: cone angle changes brightness physically.");
+            }
+            if (is_spot) {
+                if (light_spot_inner_deg) {
+                    ImGui::SliderFloat("Spot Inner (deg)", light_spot_inner_deg, 0.5f, 89.0f, "%.2f");
+                }
+                if (light_spot_outer_deg) {
+                    ImGui::SliderFloat("Spot Outer (deg)", light_spot_outer_deg, 0.5f, 89.5f, "%.2f");
+                }
+                if (light_spot_inner_deg && light_spot_outer_deg) {
+                    if (*light_spot_outer_deg < *light_spot_inner_deg) {
+                        *light_spot_outer_deg = *light_spot_inner_deg;
+                    }
+                }
+            }
+            if (is_sun) {
+                if (light_sun_angular_radius_deg) {
+                    ImGui::SliderFloat("Sun Angular Radius", light_sun_angular_radius_deg, 0.01f, 10.0f, "%.3f");
+                }
+                if (light_sun_halo_size) {
+                    ImGui::SliderFloat("Sun Halo Size", light_sun_halo_size, 0.0f, 50.0f, "%.3f");
+                }
+                if (light_sun_halo_falloff) {
+                    ImGui::SliderFloat("Sun Halo Falloff", light_sun_halo_falloff, 0.0f, 200.0f, "%.3f");
+                }
+            }
+            if (light_cast_shadows) {
+                bool shadows_available = !is_point;
+                if (!shadows_available) {
+                    ImGui::BeginDisabled();
+                }
+                ImGui::Checkbox("Cast Shadows", light_cast_shadows);
+                if (!shadows_available) {
+                    ImGui::EndDisabled();
+                    ImGui::TextDisabled("Point lights do not cast shadows in Filament.");
+                }
+            }
+            bool show_shadow_options = light_cast_shadows && *light_cast_shadows;
+            if (show_shadow_options) {
+                if (light_shadow_map_size) {
+                    ImGui::SliderInt("Shadow Map Size", light_shadow_map_size, 256, 4096);
+                }
+                if (light_shadow_cascades) {
+                    if (type_value == 0 || type_value == 1) {
+                        ImGui::SliderInt("Shadow Cascades", light_shadow_cascades, 1, 4);
+                    } else {
+                        ImGui::BeginDisabled();
+                        ImGui::SliderInt("Shadow Cascades", light_shadow_cascades, 1, 4);
+                        ImGui::EndDisabled();
+                        *light_shadow_cascades = 1;
+                    }
+                }
+                if (light_shadow_far) {
+                    ImGui::SliderFloat("Shadow Far", light_shadow_far, 0.0f, 500.0f, "%.3f");
+                }
+                if (light_shadow_near_hint) {
+                    ImGui::SliderFloat("Shadow Near Hint", light_shadow_near_hint, 0.0f, 50.0f, "%.3f");
+                }
+                if (light_shadow_far_hint) {
+                    ImGui::SliderFloat("Shadow Far Hint", light_shadow_far_hint, 0.0f, 500.0f, "%.3f");
                 }
             }
         }

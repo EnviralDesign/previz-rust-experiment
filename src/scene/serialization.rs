@@ -19,16 +19,18 @@ pub fn save_scene_to_file(scene: &SceneState, path: &Path) -> Result<()> {
 
 pub fn load_scene_from_file(path: &Path) -> Result<SceneState> {
     let json = std::fs::read_to_string(path)?;
-    let scene: SceneState = serde_json::from_str(&json)?;
+    let mut scene: SceneState = serde_json::from_str(&json)?;
+    scene.migrate_legacy_light_objects();
+    scene.ensure_object_ids();
     Ok(scene)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::scene::{
-        AssetData, DirectionalLightData, EnvironmentData, MaterialOverrideData,
-        MaterialTextureBindingData, MediaSourceKind, SceneObject, SceneObjectKind, SceneState,
-        TextureColorSpace,
+        AssetData, EnvironmentData, LightData, LightType, MaterialOverrideData,
+        MaterialTextureBindingData, MediaSourceKind, SceneObject,
+        SceneObjectKind, SceneState, TextureColorSpace,
     };
 
     #[test]
@@ -44,11 +46,21 @@ mod tests {
         let mut scene = SceneState::new();
         scene.add_object(SceneObject {
             id: 1,
-            name: "Light".to_string(),
-            kind: SceneObjectKind::DirectionalLight(DirectionalLightData {
+            name: "Directional Light".to_string(),
+            kind: SceneObjectKind::Light(LightData {
+                light_type: LightType::Directional,
                 color: [1.0, 1.0, 1.0],
                 intensity: 100_000.0,
+                position: [0.0, 2.0, 2.0],
+                rotation_deg: [0.0, 0.0, 0.0],
                 direction: [0.0, -1.0, -0.5],
+                range: 10.0,
+                spot_inner_deg: 25.0,
+                spot_outer_deg: 35.0,
+                sun_angular_radius_deg: 0.545,
+                sun_halo_size: 10.0,
+                sun_halo_falloff: 80.0,
+                shadow: Default::default(),
             }),
         });
 
@@ -59,12 +71,46 @@ mod tests {
         assert_eq!(loaded.objects().len(), 1);
 
         match &loaded.objects()[0].kind {
-            SceneObjectKind::DirectionalLight(data) => {
+            SceneObjectKind::Light(data) => {
+                assert_eq!(data.light_type, LightType::Directional);
                 assert_eq!(data.color, [1.0, 1.0, 1.0]);
                 assert_eq!(data.intensity, 100_000.0);
                 assert_eq!(data.direction, [0.0, -1.0, -0.5]);
             }
-            _ => panic!("Expected DirectionalLight"),
+            _ => panic!("Expected Light"),
+        }
+    }
+
+    #[test]
+    fn test_legacy_directional_light_migrates_on_load() {
+        let json = r#"
+{
+  "objects": [
+    {
+      "id": 1,
+      "name": "Light",
+      "kind": {
+        "DirectionalLight": {
+          "color": [1.0, 1.0, 1.0],
+          "intensity": 100000.0,
+          "direction": [0.0, -1.0, -0.5]
+        }
+      }
+    }
+  ]
+}
+        "#;
+        let mut path = std::env::temp_dir();
+        path.push("previz_legacy_light_scene.json");
+        std::fs::write(&path, json).unwrap();
+        let loaded = super::load_scene_from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        match &loaded.objects()[0].kind {
+            SceneObjectKind::Light(data) => {
+                assert_eq!(data.light_type, LightType::Directional);
+                assert_eq!(data.direction, [0.0, -1.0, -0.5]);
+            }
+            _ => panic!("Expected migrated light"),
         }
     }
 
@@ -116,11 +162,21 @@ mod tests {
         });
         scene.add_object(SceneObject {
             id: 2,
-            name: "Light".to_string(),
-            kind: SceneObjectKind::DirectionalLight(DirectionalLightData {
+            name: "Directional Light".to_string(),
+            kind: SceneObjectKind::Light(LightData {
+                light_type: LightType::Directional,
                 color: [1.0, 1.0, 1.0],
                 intensity: 100_000.0,
+                position: [0.0, 2.0, 2.0],
+                rotation_deg: [0.0, 0.0, 0.0],
                 direction: [0.0, -1.0, -0.5],
+                range: 10.0,
+                spot_inner_deg: 25.0,
+                spot_outer_deg: 35.0,
+                sun_angular_radius_deg: 0.545,
+                sun_halo_size: 10.0,
+                sun_halo_falloff: 80.0,
+                shadow: Default::default(),
             }),
         });
         scene.add_object(SceneObject {

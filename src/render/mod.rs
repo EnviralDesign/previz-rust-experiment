@@ -1,14 +1,16 @@
 mod camera;
 mod editor_overlay;
+mod light_helpers;
 pub mod pick;
 
 pub use camera::{CameraController, CameraMovement};
 pub use editor_overlay::GizmoParams;
+pub use light_helpers::LightHelperSpec;
 pub use pick::{PickHit, PickKey, PickKind, PickSystem};
 
 use crate::filament::{
-    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, MaterialInstance, Renderer, Scene,
-    Skybox, SwapChain, Texture, TextureInternalFormat, TextureUsage, View,
+    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, LightParams, MaterialInstance,
+    Renderer, Scene, Skybox, SwapChain, Texture, TextureInternalFormat, TextureUsage, View,
 };
 use std::ffi::c_void;
 use std::ffi::CString;
@@ -57,7 +59,6 @@ pub struct RenderContext {
     scene: Scene,
     camera: Camera,
     selected_entity: Option<Entity>,
-    light_entity: Option<Entity>,
     indirect_light: Option<IndirectLight>,
     indirect_light_texture: Option<Texture>,
     skybox: Option<Skybox>,
@@ -68,6 +69,8 @@ pub struct RenderContext {
     pick_view: Option<View>,
     pending_pick_entities: Option<Vec<(PickKey, Vec<Entity>)>>,
     editor_overlay: Option<editor_overlay::EditorOverlay>,
+    light_helpers: Option<light_helpers::LightHelperSystem>,
+    light_helper_specs: Vec<LightHelperSpec>,
     viewport_width: u32,
     viewport_height: u32,
 }
@@ -142,6 +145,12 @@ impl RenderContext {
             &mut entity_manager,
             LAYER_OVERLAY,
         );
+        let light_helpers = light_helpers::LightHelperSystem::new(
+            &mut engine,
+            &mut scene,
+            &mut entity_manager,
+            LAYER_OVERLAY,
+        );
 
         Ok(Self {
             engine,
@@ -155,7 +164,6 @@ impl RenderContext {
             scene,
             camera,
             selected_entity: None,
-            light_entity: None,
             indirect_light: None,
             indirect_light_texture: None,
             skybox: None,
@@ -165,6 +173,8 @@ impl RenderContext {
             pick_view,
             pending_pick_entities: None,
             editor_overlay,
+            light_helpers,
+            light_helper_specs: Vec::new(),
             viewport_width: window_size.width.max(1),
             viewport_height: window_size.height.max(1),
         })
@@ -179,31 +189,33 @@ impl RenderContext {
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
-        self.viewport_width = new_size.width.max(1);
-        self.viewport_height = new_size.height.max(1);
+        let width = new_size.width.max(1);
+        let height = new_size.height.max(1);
+        self.viewport_width = width;
+        self.viewport_height = height;
         self.view
-            .set_viewport(0, 0, new_size.width, new_size.height);
-        let aspect = new_size.width as f64 / new_size.height as f64;
+            .set_viewport(0, 0, width, height);
+        let aspect = width as f64 / height as f64;
         self.camera
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
         if let Some(overlay_view) = &mut self.overlay_view {
-            overlay_view.set_viewport(0, 0, new_size.width, new_size.height);
+            overlay_view.set_viewport(0, 0, width, height);
         }
         if let Some(ui_view) = &mut self.ui_view {
-            ui_view.set_viewport(0, 0, new_size.width, new_size.height);
+            ui_view.set_viewport(0, 0, width, height);
         }
         // Resize pick system
         if let Some(ps) = &mut self.pick_system {
-            ps.resize(&mut self.engine, new_size.width, new_size.height);
+            ps.resize(&mut self.engine, width, height);
             if let Some(pv) = &mut self.pick_view {
-                pv.set_viewport(0, 0, new_size.width, new_size.height);
+                pv.set_viewport(0, 0, width, height);
                 pv.set_render_target(Some(ps.render_target()));
             }
         }
         if let Some(ui_helper) = &mut self.ui_helper {
             ui_helper.set_display_size(
-                new_size.width as i32,
-                new_size.height as i32,
+                width as i32,
+                height as i32,
                 1.0,
                 1.0,
                 false,
@@ -213,7 +225,9 @@ impl RenderContext {
 
     pub fn set_projection_for_window(&mut self, window: &Window) {
         let size = window.inner_size();
-        let aspect = size.width as f64 / size.height as f64;
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+        let aspect = width as f64 / height as f64;
         self.camera
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
     }
@@ -223,11 +237,13 @@ impl RenderContext {
             .engine
             .create_view()
             .ok_or(RenderError::UiViewCreateFailed)?;
-        ui_view.set_viewport(0, 0, window.inner_size().width, window.inner_size().height);
+        let size = window.inner_size();
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+        ui_view.set_viewport(0, 0, width, height);
         let mut helper = ImGuiHelper::create(&mut self.engine, &mut ui_view, None)
             .ok_or(RenderError::UiHelperCreateFailed)?;
-        let size = window.inner_size();
-        helper.set_display_size(size.width as i32, size.height as i32, 1.0, 1.0, false);
+        helper.set_display_size(width as i32, height as i32, 1.0, 1.0, false);
         self.ui_view = Some(ui_view);
         self.ui_helper = Some(helper);
         Ok(())
@@ -296,6 +312,19 @@ impl RenderContext {
         light_color_rgb: &mut [f32; 3],
         light_intensity: &mut f32,
         light_dir_xyz: &mut [f32; 3],
+        light_type: &mut i32,
+        light_range: &mut f32,
+        light_spot_inner_deg: &mut f32,
+        light_spot_outer_deg: &mut f32,
+        light_sun_angular_radius_deg: &mut f32,
+        light_sun_halo_size: &mut f32,
+        light_sun_halo_falloff: &mut f32,
+        light_cast_shadows: &mut bool,
+        light_shadow_map_size: &mut i32,
+        light_shadow_cascades: &mut i32,
+        light_shadow_far: &mut f32,
+        light_shadow_near_hint: &mut f32,
+        light_shadow_far_hint: &mut f32,
         material_names: &[CString],
         selected_material_index: &mut i32,
         material_base_color_rgba: &mut [f32; 4],
@@ -305,9 +334,9 @@ impl RenderContext {
         material_binding_param_names: &[CString],
         material_binding_sources: &mut [u8],
         material_binding_source_stride: i32,
-        material_binding_wrap_repeat_u: &mut [bool],
-        material_binding_wrap_repeat_v: &mut [bool],
-        material_binding_srgb: &mut [bool],
+        material_binding_wrap_repeat_u: &mut [u8],
+        material_binding_wrap_repeat_v: &mut [u8],
+        material_binding_srgb: &mut [u8],
         material_binding_uv_offset: &mut [f32],
         material_binding_uv_scale: &mut [f32],
         material_binding_uv_rotation_deg: &mut [f32],
@@ -323,7 +352,7 @@ impl RenderContext {
         environment_apply: &mut bool,
         environment_generate: &mut bool,
         create_gltf: &mut bool,
-        create_light: &mut bool,
+        create_light_kind: &mut i32,
         create_environment: &mut bool,
         save_scene: &mut bool,
         load_scene: &mut bool,
@@ -361,6 +390,19 @@ impl RenderContext {
                 light_color_rgb,
                 light_intensity,
                 light_dir_xyz,
+                light_type,
+                light_range,
+                light_spot_inner_deg,
+                light_spot_outer_deg,
+                light_sun_angular_radius_deg,
+                light_sun_halo_size,
+                light_sun_halo_falloff,
+                light_cast_shadows,
+                light_shadow_map_size,
+                light_shadow_cascades,
+                light_shadow_far,
+                light_shadow_near_hint,
+                light_shadow_far_hint,
                 &material_ptrs,
                 selected_material_index,
                 material_base_color_rgba,
@@ -388,7 +430,7 @@ impl RenderContext {
                 environment_apply,
                 environment_generate,
                 create_gltf,
-                create_light,
+                create_light_kind,
                 create_environment,
                 save_scene,
                 load_scene,
@@ -443,15 +485,8 @@ impl RenderContext {
             * 1000.0
     }
 
-    pub fn set_directional_light(&mut self, color: [f32; 3], intensity: f32, direction: [f32; 3]) {
-        if let Some(entity) = self.light_entity {
-            self.engine
-                .set_directional_light(entity, color, intensity, direction);
-        }
-    }
-
-    pub fn set_light_entity(&mut self, entity: Entity) {
-        self.light_entity = Some(entity);
+    pub fn set_light(&mut self, entity: Entity, params: LightParams) {
+        self.engine.set_light(entity, params);
     }
 
     pub fn set_selected_entity(&mut self, entity: Option<Entity>) {
@@ -553,6 +588,17 @@ impl RenderContext {
         if let Some(pick_view) = &mut self.pick_view {
             pick_view.set_scene(&mut self.scene);
         }
+        self.light_helper_specs.clear();
+        if let Some(mut entity_manager) = self.engine.entity_manager() {
+            self.light_helpers = light_helpers::LightHelperSystem::new(
+                &mut self.engine,
+                &mut self.scene,
+                &mut entity_manager,
+                LAYER_OVERLAY,
+            );
+        } else {
+            self.light_helpers = None;
+        }
 
         // Reset environment
         self.scene.set_indirect_light(None);
@@ -562,8 +608,6 @@ impl RenderContext {
         self.skybox = None;
         self.skybox_texture = None;
 
-        // Reset light entity reference (it will be recreated if needed)
-        self.light_entity = None;
     }
 
     pub fn flush_and_wait(&mut self) {
@@ -595,7 +639,11 @@ impl RenderContext {
             return;
         }
         let mut merged = pickable_entities.to_vec();
+        if let Some(system) = &self.light_helpers {
+            merged.extend(system.pickables(&self.light_helper_specs));
+        }
         if let Some(overlay) = &self.editor_overlay {
+            // Keep gizmo handles last so they win pick priority over helper geometry.
             merged.extend(overlay.pickable_entities());
         }
         self.pending_pick_entities = Some(merged);
@@ -617,11 +665,28 @@ impl RenderContext {
         }
     }
 
+    pub fn sync_light_helpers(&mut self, specs: &[LightHelperSpec], camera_position: [f32; 3]) {
+        self.light_helper_specs.clear();
+        self.light_helper_specs.extend_from_slice(specs);
+        let Some(system) = &mut self.light_helpers else {
+            return;
+        };
+        let Some(mut entity_manager) = self.engine.entity_manager() else {
+            log::warn!("Entity manager unavailable; skipping light helper sync.");
+            return;
+        };
+        system.sync(
+            &mut self.engine,
+            &mut self.scene,
+            &mut entity_manager,
+            specs,
+            camera_position,
+        );
+    }
+
     pub fn capture_window_png(&mut self, path: &Path, include_ui: bool) -> Result<(), String> {
         if !self.renderer.begin_frame(&mut self.swap_chain) {
-            return self.capture_swap_chain_png(path).map_err(|_| {
-                "capture frame unavailable: begin_frame returned false".to_string()
-            });
+            return Err("capture frame unavailable: begin_frame returned false".to_string());
         }
 
         let width = self.viewport_width.max(1);
@@ -695,6 +760,7 @@ impl RenderContext {
         Self::save_png(path, width, height, &pixels)
     }
 
+    #[allow(dead_code)]
     fn capture_swap_chain_png(&mut self, path: &Path) -> Result<(), String> {
         let width = self.viewport_width.max(1);
         let height = self.viewport_height.max(1);
