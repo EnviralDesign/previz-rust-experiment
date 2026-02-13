@@ -156,10 +156,17 @@ impl EditorOverlay {
             } else {
                 ([1.0, 1.0, 1.0], 1.0)
             };
+            let (rgb, alpha_mult) = if is_highlighted
+                && (handle.handle_id == GIZMO_ROTATE_VIEW || handle.handle_id == GIZMO_SCALE_UNIFORM)
+            {
+                ([1.50, 1.50, 1.50], 1.20)
+            } else {
+                (rgb, alpha_mult)
+            };
             let mut alpha = (handle.base_alpha * fade * alpha_mult).clamp(0.0, 1.0);
             // Inner arcball disk should always stay subtle.
             if handle.handle_id == GIZMO_ROTATE_ARCBALL {
-                alpha = alpha.min(0.20);
+                alpha = alpha.min(0.12);
             }
             let rgba = [rgb[0], rgb[1], rgb[2], alpha];
             handle.material_instance.set_float4("tint", rgba);
@@ -255,24 +262,24 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let x_col = [220, 118, 118, 255];
-        let y_col = [132, 210, 132, 255];
-        let z_col = [126, 168, 220, 255];
+        let x_col = [214, 128, 128, 255];
+        let y_col = [142, 196, 142, 255];
+        let z_col = [132, 162, 206, 255];
         let data = [
             // Translate shafts + arrow heads.
-            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.41, 0.0, 0.0], [0.82, 0.017, 0.017], x_col)),
-            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.0, 0.41, 0.0], [0.017, 0.82, 0.017], y_col)),
-            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.41], [0.017, 0.017, 0.82], z_col)),
-            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [1.0, 0.0, 0.0], 1, 0.14, 0.045, x_col)),
-            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 1.0, 0.0], 2, 0.14, 0.045, y_col)),
-            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 0.0, 1.0], 3, 0.14, 0.045, z_col)),
+            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.47, 0.0, 0.0], [0.94, 0.017, 0.017], x_col)),
+            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.0, 0.47, 0.0], [0.017, 0.94, 0.017], y_col)),
+            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.47], [0.017, 0.017, 0.94], z_col)),
+            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [1.0, 0.0, 0.0], 1, 0.12, 0.045, x_col)),
+            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 1.0, 0.0], 2, 0.12, 0.045, y_col)),
+            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 0.0, 1.0], 3, 0.12, 0.045, z_col)),
             // Scale shafts + square heads.
-            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.43, 0.0, 0.0], [0.86, 0.017, 0.017], x_col)),
-            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.43, 0.0], [0.017, 0.86, 0.017], y_col)),
-            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.43], [0.017, 0.017, 0.86], z_col)),
-            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [1.0, 0.0, 0.0], [0.08, 0.08, 0.08], x_col)),
-            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 1.0, 0.0], [0.08, 0.08, 0.08], y_col)),
-            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 1.0], [0.08, 0.08, 0.08], z_col)),
+            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.47, 0.0, 0.0], [0.94, 0.017, 0.017], x_col)),
+            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.47, 0.0], [0.017, 0.94, 0.017], y_col)),
+            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.47], [0.017, 0.017, 0.94], z_col)),
+            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.98, 0.0, 0.0], [0.08, 0.08, 0.08], x_col)),
+            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.98, 0.0], [0.08, 0.08, 0.08], y_col)),
+            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.98], [0.08, 0.08, 0.08], z_col)),
         ];
         for (id, kind, mask, bb, pickable, base_alpha, mesh) in data {
             if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, Mat3::IDENTITY, bb, pickable, base_alpha) {
@@ -317,17 +324,17 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let ring_x = create_ring_mesh(engine, 1.10, 0.008, [220, 118, 118, 210], 64, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2));
-        let ring_y = create_ring_mesh(engine, 1.10, 0.008, [132, 210, 132, 210], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
-        let ring_z = create_ring_mesh(engine, 1.10, 0.008, [126, 168, 220, 210], 64, Mat3::IDENTITY);
-        let view_ring = create_ring_mesh(engine, 1.22, 0.007, [230, 230, 230, 200], 64, Mat3::IDENTITY);
-        let arcball_disk = create_disk_mesh(engine, 1.03, [210, 210, 210, 18], 48);
+        let ring_x = create_ring_mesh(engine, 1.10, 0.008, [214, 128, 128, 200], 64, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let ring_y = create_ring_mesh(engine, 1.10, 0.008, [142, 196, 142, 200], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
+        let ring_z = create_ring_mesh(engine, 1.10, 0.008, [132, 162, 206, 200], 64, Mat3::IDENTITY);
+        let view_ring = create_ring_mesh(engine, 1.22, 0.007, [150, 150, 150, 170], 64, Mat3::IDENTITY);
+        let arcball_disk = create_disk_mesh(engine, 1.03, [210, 210, 210, 10], 48);
         let specs = [
+            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, 0.10, arcball_disk),
             (GIZMO_ROTATE_X, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_x),
             (GIZMO_ROTATE_Y, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_y),
             (GIZMO_ROTATE_Z, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_z),
-            (GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, 1.0, view_ring),
-            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, 0.15, arcball_disk),
+            (GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, 0.75, view_ring),
         ];
         for (id, kind, mask, billboard, pickable, base_alpha, mesh) in specs {
             if let Some(h) = Self::add_handle(
@@ -361,9 +368,9 @@ impl EditorOverlay {
         let mut out = Vec::new();
         let mesh = create_ring_mesh(
             engine,
-            1.28,
+            1.22,
             0.009,
-            [245, 245, 245, 210],
+            [150, 150, 150, 170],
             64,
             Mat3::IDENTITY,
         );
@@ -380,7 +387,7 @@ impl EditorOverlay {
             Mat3::IDENTITY,
             true,
             true,
-            1.0,
+            0.75,
         ) {
             out.push(h);
         }
