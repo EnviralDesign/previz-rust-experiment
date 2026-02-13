@@ -1202,6 +1202,17 @@ impl App {
                 }
             }
         }
+        log::debug!(
+            "Editor state pre-ui: selection_id={:?} current_selection_index={:?} selected_index_ui={} object_count={} gizmo_visible={} gizmo_active_axis={} gizmo_hover_axis={} pending_pick_request={:?}",
+            self.selection_id,
+            self.current_selection_index(),
+            selected_index,
+            self.scene.objects().len(),
+            gizmo_visible,
+            self.gizmo_active_axis,
+            self.gizmo_hover_axis,
+            self.pending_pick_request,
+        );
         let selected_for_helpers =
             Self::normalize_selection(selected_index, self.scene.objects().len());
         let light_helper_specs: Vec<crate::render::LightHelperSpec> = self
@@ -1464,6 +1475,17 @@ impl App {
                     self.timing.frame_dt,
                 );
                 self.timing.set_render_ms(render_ms);
+                log::debug!(
+                    "Editor state post-ui: selection_id={:?} selected_index_ui={} normalized_selection_index={:?} object_count={} gizmo_visible={} gizmo_active_axis={} gizmo_hover_axis={} pending_pick_request={:?}",
+                    self.selection_id,
+                    selected_index,
+                    Self::normalize_selection(selected_index, self.scene.objects().len()),
+                    self.scene.objects().len(),
+                    gizmo_visible,
+                    self.gizmo_active_axis,
+                    self.gizmo_hover_axis,
+                    self.pending_pick_request,
+                );
 
                 // Capture GPU pick result (processed after borrow scope)
                 pick_hit = render.take_pick_hit();
@@ -1480,6 +1502,14 @@ impl App {
                 .pending_pick_request
                 .take()
                 .unwrap_or(PickRequestKind::HoverGizmo);
+            log::debug!(
+                "Pick result: request={:?} hit_kind={:?} hit_object_id={} hit_sub_id={} hit_none={}",
+                pick_request,
+                hit.key.kind,
+                hit.key.object_id,
+                hit.key.sub_id,
+                hit.is_none(),
+            );
             match pick_request {
                 PickRequestKind::HoverGizmo => {
                     if hit.is_none() {
@@ -1560,6 +1590,17 @@ impl App {
             selected_index,
             self.scene.objects().len(),
         ));
+        log::debug!(
+            "Editor state post-selection-sync: selection_id={:?} current_selection_index={:?} selected_index_ui={} object_count={} gizmo_visible={} gizmo_active_axis={} gizmo_hover_axis={} pending_pick_request={:?}",
+            self.selection_id,
+            self.current_selection_index(),
+            selected_index,
+            self.scene.objects().len(),
+            gizmo_visible,
+            self.gizmo_active_axis,
+            self.gizmo_hover_axis,
+            self.pending_pick_request,
+        );
         selected_index = Self::selection_to_ui_index(self.current_selection_index());
         self.ui.set_selected_index(selected_index);
         self.ui.set_light_settings(light_settings);
@@ -2601,6 +2642,16 @@ impl App {
     }
 
     fn command_delete_object(&mut self, index: usize) -> Result<CommandOutcome, CommandError> {
+        let object_count_before = self.scene.objects().len();
+        let selection_id_before = self.selection_id;
+        let selection_index_before = self.current_selection_index();
+        log::debug!(
+            "Delete command start: index={} selection_id={:?} selection_index={:?} object_count={}",
+            index,
+            selection_id_before,
+            selection_index_before,
+            object_count_before,
+        );
         let Some(removed) = self.scene.remove_object(index) else {
             return Err(CommandError::SceneObjectNotFound { index });
         };
@@ -2624,6 +2675,16 @@ impl App {
                 )
             });
         self.set_selection_from_index(fallback_selection);
+        let object_count_after = self.scene.objects().len();
+        log::debug!(
+            "Delete command post-remove: removed='{}' fallback_selection={:?} selection_id={:?} selection_index={:?} object_count_before={} object_count_after={}",
+            removed.name,
+            fallback_selection,
+            self.selection_id,
+            self.current_selection_index(),
+            object_count_before,
+            object_count_after,
+        );
         match self.rebuild_runtime_scene() {
             Ok(()) => Ok(CommandOutcome::Notice(CommandNotice {
                 severity: CommandSeverity::Info,
@@ -3104,8 +3165,13 @@ fn format_rebuild_errors(errors: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_rebuild_errors, App, CommandError, SceneCommand};
-    use crate::scene::{LightData, LightType, MaterialTextureBindingData, MediaSourceKind, TextureColorSpace};
+    use super::{
+        format_rebuild_errors, App, CommandError, SceneCommand, TransformToolMode,
+    };
+    use crate::scene::{
+        LightData, LightType, MaterialTextureBindingData, MediaSourceKind, SceneObjectKind,
+        TextureColorSpace,
+    };
 
     #[test]
     fn rebuild_error_format_empty_is_none() {
@@ -3184,6 +3250,7 @@ mod tests {
             .add_asset_with_id(asset_id, "Asset".to_string(), "assets/gltf/DamagedHelmet.gltf");
         app.scene
             .add_light("Point Light 1", LightData::default_for(LightType::Point));
+        app.transform_tool_mode = TransformToolMode::Translate;
         app.set_selection_from_index(Some(1));
         app.gizmo_active_axis = 3;
         app.gizmo_hover_axis = 2;
@@ -3191,7 +3258,14 @@ mod tests {
 
         let result = app.command_delete_object(1);
         assert!(result.is_ok());
+        assert_eq!(app.scene.objects().len(), 1);
+        assert_eq!(app.selection_id, Some(asset_id));
         assert_eq!(app.current_selection_index(), Some(0));
+        assert!(matches!(
+            app.scene.objects().first().map(|object| &object.kind),
+            Some(SceneObjectKind::Asset(_))
+        ));
+        assert_eq!(app.transform_tool_mode, TransformToolMode::Translate);
         assert_eq!(app.gizmo_active_axis, super::GIZMO_NONE);
         assert_eq!(app.gizmo_hover_axis, super::GIZMO_NONE);
         assert!(app.pending_pick_request.is_none());

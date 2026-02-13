@@ -298,6 +298,14 @@ impl PickSystem {
         self.last_hit.take()
     }
 
+    /// Clear in-flight and cached pick state after a scene teardown/rebuild.
+    pub fn reset_scene_state(&mut self) {
+        self.pending_pick = None;
+        self.pending_readback = None;
+        self.last_hit = None;
+        self.staged_keys.clear();
+    }
+
     /// Get or create a MaterialInstance for a given pick object_id.
     fn ensure_pick_instance(&mut self, key: PickKey) -> &MaterialInstance {
         let rgba = key.to_rgba();

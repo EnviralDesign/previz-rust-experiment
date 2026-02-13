@@ -588,6 +588,13 @@ impl RenderContext {
         if let Some(pick_view) = &mut self.pick_view {
             pick_view.set_scene(&mut self.scene);
         }
+        self.pending_pick_entities = None;
+        if let Some(ps) = &mut self.pick_system {
+            ps.reset_scene_state();
+        }
+        if let Some(overlay) = &self.editor_overlay {
+            overlay.attach_to_scene(&mut self.scene);
+        }
         self.light_helper_specs.clear();
         if let Some(mut entity_manager) = self.engine.entity_manager() {
             self.light_helpers = light_helpers::LightHelperSystem::new(

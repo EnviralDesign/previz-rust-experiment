@@ -169,6 +169,12 @@ impl EditorOverlay {
         self.update_line_geometry();
     }
 
+    pub fn attach_to_scene(&self, scene: &mut Scene) {
+        for handle in &self.handles {
+            scene.add_entity(handle.entity);
+        }
+    }
+
     pub fn pickable_entities(&self) -> Vec<(PickKey, Vec<Entity>)> {
         let Some(object_id) = self.params.selected_object_index else {
             return Vec::new();
