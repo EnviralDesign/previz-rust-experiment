@@ -60,8 +60,8 @@ Available harness flags:
 - `--harness-import <path>` required; glTF/GLB to import.
 - `--harness-screenshot <path>` optional; captures only the application window render output.
 - `--harness-report <path>` optional; writes JSON result summary.
-- `--harness-settle-frames <n>` optional; default `30`.
-- `--harness-max-frames <n>` optional; default `360`.
+- `--harness-settle-frames <n>` optional; default `90`.
+- `--harness-max-frames <n>` optional; default `1500`.
 - `--harness-no-ui` optional; excludes ImGui layer from capture.
 - `--harness-no-light` optional; disables default directional light (enabled by default).
 - `--harness-env <none|adamsplace|artistworkshop>` optional; default `adamsplace`.

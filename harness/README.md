@@ -24,8 +24,8 @@ Planning docs:
 
 - `-AssetPath` required asset path (`.gltf` / `.glb`)
 - `-Name` output prefix, default `asset_probe`
-- `-SettleFrames` frames to wait before capture, default `45`
-- `-MaxFrames` max frames before timeout/fail, default `400`
+- `-SettleFrames` frames to wait before capture, default `90`
+- `-MaxFrames` max frames before timeout/fail, default `1500`
 - `-NoUi` optional capture without ImGui overlay
 - `-NoLight` optional disable default directional light
 - `-Environment` one of `adamsplace`, `artistworkshop`, `none` (default `adamsplace`)
@@ -38,7 +38,7 @@ cargo run -- `
   --harness-import "<asset path>" `
   --harness-screenshot "harness\out\<name>.png" `
   --harness-report "harness\out\<name>.report.json" `
-  --harness-settle-frames 45 `
-  --harness-max-frames 400 `
+  --harness-settle-frames 90 `
+  --harness-max-frames 1500 `
   --harness-env adamsplace
 ```

@@ -2,8 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$AssetPath,
     [string]$Name = "asset_probe",
-    [int]$SettleFrames = 45,
-    [int]$MaxFrames = 400,
+    [int]$SettleFrames = 90,
+    [int]$MaxFrames = 1500,
     [switch]$NoUi,
     [switch]$NoLight,
     [ValidateSet("adamsplace", "artistworkshop", "none")]

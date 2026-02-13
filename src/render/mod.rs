@@ -12,7 +12,7 @@ use crate::filament::{
 };
 use std::ffi::c_void;
 use std::ffi::CString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -53,6 +53,7 @@ pub struct RenderContext {
     overlay_view: Option<View>,
     ui_view: Option<View>,
     ui_helper: Option<ImGuiHelper>,
+    ui_enabled: bool,
     scene: Scene,
     camera: Camera,
     selected_entity: Option<Entity>,
@@ -150,6 +151,7 @@ impl RenderContext {
             overlay_view,
             ui_view: None,
             ui_helper: None,
+            ui_enabled: true,
             scene,
             camera,
             selected_entity: None,
@@ -229,6 +231,10 @@ impl RenderContext {
         self.ui_view = Some(ui_view);
         self.ui_helper = Some(helper);
         Ok(())
+    }
+
+    pub fn set_ui_enabled(&mut self, enabled: bool) {
+        self.ui_enabled = enabled;
     }
 
     pub fn ui_mouse_pos(&mut self, x: f32, y: f32) {
@@ -331,7 +337,8 @@ impl RenderContext {
         delta_seconds: f32,
     ) -> f32 {
         let frame_start = std::time::Instant::now();
-        if let Some(ui_helper) = &mut self.ui_helper {
+        if self.ui_enabled {
+            if let Some(ui_helper) = &mut self.ui_helper {
             let name_ptrs: Vec<*const std::ffi::c_char> =
                 object_names.iter().map(|name| name.as_ptr()).collect();
             let material_ptrs: Vec<*const std::ffi::c_char> =
@@ -394,6 +401,7 @@ impl RenderContext {
                 gizmo_active_axis,
             );
         }
+        }
         if self.renderer.begin_frame(&mut self.swap_chain) {
             // GPU pick pass — render to offscreen RT before beauty pass
             if let Some(pickable) = self.pending_pick_entities.take() {
@@ -411,8 +419,10 @@ impl RenderContext {
             if let Some(overlay_view) = &self.overlay_view {
                 self.renderer.render(overlay_view);
             }
-            if let Some(ui_view) = &self.ui_view {
-                self.renderer.render(ui_view);
+            if self.ui_enabled {
+                if let Some(ui_view) = &self.ui_view {
+                    self.renderer.render(ui_view);
+                }
             }
             self.renderer.end_frame();
         }
@@ -608,6 +618,12 @@ impl RenderContext {
     }
 
     pub fn capture_window_png(&mut self, path: &Path, include_ui: bool) -> Result<(), String> {
+        if !self.renderer.begin_frame(&mut self.swap_chain) {
+            return self.capture_swap_chain_png(path).map_err(|_| {
+                "capture frame unavailable: begin_frame returned false".to_string()
+            });
+        }
+
         let width = self.viewport_width.max(1);
         let height = self.viewport_height.max(1);
         let Some(color) = self.engine.create_texture_2d(
@@ -620,6 +636,7 @@ impl RenderContext {
                 TextureUsage::BlitSrc,
             ),
         ) else {
+            self.renderer.end_frame();
             return Err("failed to create capture color texture".to_string());
         };
         let Some(depth) = self.engine.create_texture_2d(
@@ -628,9 +645,11 @@ impl RenderContext {
             TextureInternalFormat::Depth24,
             TextureUsage::DepthAttachment as u32,
         ) else {
+            self.renderer.end_frame();
             return Err("failed to create capture depth texture".to_string());
         };
         let Some(render_target) = self.engine.create_render_target(&color, Some(&depth)) else {
+            self.renderer.end_frame();
             return Err("failed to create capture render target".to_string());
         };
 
@@ -644,18 +663,14 @@ impl RenderContext {
             }
         }
 
-        let did_render = self.renderer.begin_frame(&mut self.swap_chain);
-        if did_render {
-            self.renderer.render(&self.view);
-            if let Some(overlay_view) = &self.overlay_view {
-                self.renderer.render(overlay_view);
+        self.renderer.render(&self.view);
+        if let Some(overlay_view) = &self.overlay_view {
+            self.renderer.render(overlay_view);
+        }
+        if include_ui {
+            if let Some(ui_view) = &self.ui_view {
+                self.renderer.render(ui_view);
             }
-            if include_ui {
-                if let Some(ui_view) = &self.ui_view {
-                    self.renderer.render(ui_view);
-                }
-            }
-            self.renderer.end_frame();
         }
 
         self.view.set_render_target(None);
@@ -667,10 +682,7 @@ impl RenderContext {
                 ui_view.set_render_target(None);
             }
         }
-
-        if !did_render {
-            return Err("capture frame unavailable: begin_frame returned false".to_string());
-        }
+        self.renderer.end_frame();
 
         let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
         if !self
@@ -680,7 +692,24 @@ impl RenderContext {
             return Err("failed scheduling capture readback".to_string());
         }
         self.engine.flush_and_wait();
+        Self::save_png(path, width, height, &pixels)
+    }
 
+    fn capture_swap_chain_png(&mut self, path: &Path) -> Result<(), String> {
+        let width = self.viewport_width.max(1);
+        let height = self.viewport_height.max(1);
+        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        if !self
+            .renderer
+            .read_pixels_swap_chain(0, 0, width, height, &mut pixels)
+        {
+            return Err("failed scheduling swap chain capture readback".to_string());
+        }
+        self.engine.flush_and_wait();
+        Self::save_png(path, width, height, &pixels)
+    }
+
+    fn save_png(path: &Path, width: u32, height: u32, pixels: &[u8]) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|err| {
@@ -694,8 +723,8 @@ impl RenderContext {
         }
 
         image::save_buffer_with_format(
-            path,
-            &pixels,
+            PathBuf::from(path),
+            pixels,
             width,
             height,
             image::ColorType::Rgba8,

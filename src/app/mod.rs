@@ -202,6 +202,8 @@ enum HarnessEnvironmentPreset {
 struct HarnessState {
     config: HarnessConfig,
     frame_count: u32,
+    next_capture_frame: u32,
+    screenshot_retry_count: u32,
     setup_attempted: bool,
     setup_success: bool,
     setup_error: Option<String>,
@@ -233,9 +235,12 @@ struct HarnessReport {
 
 impl HarnessState {
     fn new(config: HarnessConfig) -> Self {
+        let settle_frames = config.settle_frames;
         Self {
             config,
             frame_count: 0,
+            next_capture_frame: settle_frames,
+            screenshot_retry_count: 0,
             setup_attempted: false,
             setup_success: false,
             setup_error: None,
@@ -988,6 +993,9 @@ impl App {
 
     fn render(&mut self) {
         let frame_start = Instant::now();
+        // Run harness actions before the main render pass so screenshot capture
+        // does not compete with a second begin_frame call later in the same tick.
+        self.run_harness_step();
         self.ui
             .update(&self.scene, &self.scene_runtime, &self.assets);
         let ui_text = self.ui.summary().to_string();
@@ -1164,6 +1172,12 @@ impl App {
         let (mut hdr_path_string, mut ibl_path_string, mut skybox_path_string) = {
             let (hdr_path, ibl_path, skybox_path) = self.ui.environment_paths_mut();
             if let Some(render) = &mut self.render {
+                let ui_enabled = self
+                    .harness
+                    .as_ref()
+                    .map(|h| h.config.include_ui)
+                    .unwrap_or(true);
+                render.set_ui_enabled(ui_enabled);
                 let (mx, my) = if self.window_focused {
                     self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
                 } else {
@@ -1671,7 +1685,6 @@ impl App {
         self.timing
             .update(self.window.as_ref().map(|w| w.as_ref()), frame_start);
         self.update_camera();
-        self.run_harness_step();
     }
 
     fn run_harness_step(&mut self) {
@@ -1737,7 +1750,7 @@ impl App {
                 h.import_success
                     && h.config.screenshot_path.is_some()
                     && !h.screenshot_attempted
-                    && h.frame_count >= h.config.settle_frames
+                    && h.frame_count >= h.next_capture_frame
             })
             .unwrap_or(false);
         if should_capture {
@@ -1768,7 +1781,13 @@ impl App {
                     }
                     Err(err) => {
                         if err.contains("begin_frame returned false") {
-                            // Transient frame-availability issue: keep waiting and retry.
+                            // Transient frame-availability issue: stagger retries to avoid
+                            // phase-locking on unavailable frames for some assets.
+                            harness.screenshot_retry_count =
+                                harness.screenshot_retry_count.saturating_add(1);
+                            let retry_interval = 3 + (harness.screenshot_retry_count % 17);
+                            harness.next_capture_frame =
+                                harness.frame_count.saturating_add(retry_interval);
                             harness.screenshot_error = Some(err);
                         } else {
                             harness.screenshot_attempted = true;
@@ -3763,8 +3782,8 @@ fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
     let mut import_path: Option<String> = None;
     let mut screenshot_path: Option<PathBuf> = None;
     let mut report_path: Option<PathBuf> = None;
-    let mut settle_frames: u32 = 30;
-    let mut max_frames: u32 = 360;
+    let mut settle_frames: u32 = 90;
+    let mut max_frames: u32 = 1500;
     let mut include_ui = true;
     let mut add_default_light = true;
     let mut environment_preset = HarnessEnvironmentPreset::AdamsPlace;
