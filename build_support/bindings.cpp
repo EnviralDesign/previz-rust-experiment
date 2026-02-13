@@ -700,7 +700,34 @@ void filament_renderable_builder_build(RenderableBuilderWrapper* wrapper, Engine
 // Lights
 // ============================================================================
 
-int32_t filament_light_create_directional(
+static LightManager::Type filament_light_type_from_u8(uint8_t value) {
+    switch (value) {
+        case 0: return LightManager::Type::DIRECTIONAL;
+        case 1: return LightManager::Type::SUN;
+        case 2: return LightManager::Type::POINT;
+        case 3: return LightManager::Type::SPOT;
+        case 4: return LightManager::Type::FOCUSED_SPOT;
+        default: return LightManager::Type::DIRECTIONAL;
+    }
+}
+
+static LightManager::ShadowOptions build_shadow_options(
+    uint32_t shadow_map_size,
+    uint8_t shadow_cascades,
+    float shadow_far,
+    float shadow_near_hint,
+    float shadow_far_hint
+) {
+    LightManager::ShadowOptions options;
+    options.mapSize = std::max<uint32_t>(8u, shadow_map_size);
+    options.shadowCascades = std::min<uint8_t>(4u, std::max<uint8_t>(1u, shadow_cascades));
+    options.shadowFar = std::max(0.0f, shadow_far);
+    options.shadowNearHint = std::max(0.0f, shadow_near_hint);
+    options.shadowFarHint = std::max(options.shadowNearHint, shadow_far_hint);
+    return options;
+}
+
+int32_t filament_light_create(
     Engine* engine,
     EntityManager* em,
     uint8_t light_type,
