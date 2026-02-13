@@ -96,6 +96,7 @@ const GIZMO_TRANSLATE_Z: i32 = 3;
 const GIZMO_TRANSLATE_XY: i32 = 4;
 const GIZMO_TRANSLATE_XZ: i32 = 5;
 const GIZMO_TRANSLATE_YZ: i32 = 6;
+const GIZMO_TRANSLATE_SCREEN: i32 = 7;
 const GIZMO_ROTATE_X: i32 = 11;
 const GIZMO_ROTATE_Y: i32 = 12;
 const GIZMO_ROTATE_Z: i32 = 13;
@@ -108,6 +109,9 @@ const GIZMO_SCALE_XY: i32 = 24;
 const GIZMO_SCALE_XZ: i32 = 25;
 const GIZMO_SCALE_YZ: i32 = 26;
 const GIZMO_SCALE_UNIFORM: i32 = 27;
+const GIZMO_BASE_DISTANCE_FACTOR: f32 = 0.18;
+const GIZMO_BASE_MIN_WORLD_LEN: f32 = 0.15;
+const GIZMO_GLOBAL_SCALE: f32 = 0.5;
 
 #[derive(Debug, Clone, Copy)]
 struct GizmoDragState {
@@ -464,7 +468,7 @@ impl App {
             + to_camera[2] * to_camera[2])
             .sqrt()
             .max(0.1);
-        (distance * 0.18).max(0.15)
+        (distance * GIZMO_BASE_DISTANCE_FACTOR).max(GIZMO_BASE_MIN_WORLD_LEN) * GIZMO_GLOBAL_SCALE
     }
 
     fn apply_transform_tool_drag(&mut self, mouse: (f32, f32)) {
@@ -705,6 +709,12 @@ impl App {
             if let Some(reference) = self.gizmo_axis_screen_reference_len(gizmo_origin) {
                 arcball_radius_px = (reference * 0.86).max(20.0);
             }
+        } else if handle == GIZMO_TRANSLATE_SCREEN {
+            let (forward, _, _) = self.camera.basis();
+            drag_plane_normal = forward;
+            if let Some(hit) = self.ray_plane_hit(mouse, gizmo_origin, drag_plane_normal) {
+                start_hit_world = hit;
+            }
         } else if handle == GIZMO_SCALE_UNIFORM {
             if let Some(center_screen) = self.world_to_screen(gizmo_origin) {
                 uniform_scale_start_radius =
@@ -917,11 +927,7 @@ impl App {
                 if let Some(center_screen) = self.world_to_screen(world) {
                     gizmo_screen_points_xy[0] = center_screen[0];
                     gizmo_screen_points_xy[1] = center_screen[1];
-                    let dx = world[0] - self.camera.position[0];
-                    let dy = world[1] - self.camera.position[1];
-                    let dz = world[2] - self.camera.position[2];
-                    let distance = (dx * dx + dy * dy + dz * dz).sqrt().max(0.1);
-                    let axis_world_len = (distance * 0.18).max(0.15);
+                    let axis_world_len = self.gizmo_axis_world_length(world);
                     gizmo_axis_world_len = axis_world_len;
                     let x_world = [world[0] + axis_world_len, world[1], world[2]];
                     let y_world = [world[0], world[1] + axis_world_len, world[2]];
@@ -1035,8 +1041,15 @@ impl App {
                     mode: self.transform_tool_mode as i32,
                     origin: gizmo_origin_world_xyz,
                     axis_world_len: gizmo_axis_world_len,
+                    camera_position: camera_world_xyz,
                     camera_forward,
                     camera_up,
+                    viewport_height_px: self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().height)
+                        .unwrap_or(1),
+                    camera_fov_y_degrees: 45.0,
                     highlighted_handle,
                     selected_object_index: Self::normalize_selection(
                         selected_index,
@@ -1197,18 +1210,8 @@ impl App {
         } else if self.transform_tool_mode == TransformToolMode::Select || !has_active_selection {
             self.gizmo_hover_axis = GIZMO_NONE;
         }
-        // In transform modes, keep requesting pick while LMB is held until a handle is acquired.
-        // This smooths over one-frame misses when a new gizmo/handle becomes active.
-        if self.transform_tool_mode != TransformToolMode::Select
-            && self.mouse_buttons[0]
-            && self.gizmo_active_axis == GIZMO_NONE
-            && self.gizmo_drag_state.is_none()
-            && !self.mouse_over_sidebar_ui()
-        {
-            if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
-                render.request_pick(mx, my);
-            }
-        }
+        // Do not acquire a gizmo after mouse-down. Engagement is decided strictly
+        // at the press event's pick location to prevent drag-into-handle locking.
         if self.mouse_buttons[0] && self.gizmo_active_axis != GIZMO_NONE && self.gizmo_drag_state.is_none() {
             if let Some(mouse) = self.mouse_pos {
                 self.begin_gizmo_drag_if_needed(mouse);

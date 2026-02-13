@@ -389,12 +389,18 @@ impl RenderContext {
             // GPU pick pass — render to offscreen RT before beauty pass
             if let Some(pickable) = self.pending_pick_entities.take() {
                 if let (Some(ps), Some(pv)) = (&mut self.pick_system, &self.pick_view) {
+                    if let Some(overlay) = &mut self.editor_overlay {
+                        overlay.set_pick_width_mode(true);
+                    }
                     ps.render_pick_pass(
                         &mut self.engine,
                         &mut self.renderer,
                         pv,
                         &pickable,
                     );
+                    if let Some(overlay) = &mut self.editor_overlay {
+                        overlay.set_pick_width_mode(false);
+                    }
                 }
             }
             self.renderer.render(&self.view);
