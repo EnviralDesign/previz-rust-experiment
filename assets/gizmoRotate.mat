@@ -1,0 +1,47 @@
+material {
+    name : GizmoRotate,
+    requires : [
+        color
+    ],
+    shadingModel : unlit,
+    blending : transparent,
+    culling : none,
+    featureLevel : 0,
+    parameters : [
+        { type : float4, name : tint },
+        { type : float3, name : clipCenter },
+        { type : float,  name : clipBias },
+        { type : float,  name : debugMode },
+        { type : float,  name : debugScale }
+    ]
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        // Use API-level (user) world space to match CPU-provided clipCenter.
+        vec3 p = getUserWorldPosition();
+        vec3 center = materialParams.clipCenter;
+        vec3 cameraPos = (getUserWorldFromWorldMatrix() * vec4(getWorldCameraPosition(), 1.0)).xyz;
+        vec3 toCamera = cameraPos - center;
+        float len2 = dot(toCamera, toCamera);
+        vec3 n = len2 > 1e-12 ? toCamera * inversesqrt(len2) : vec3(0.0, 0.0, 1.0);
+        float d = dot(p - center, n);
+        if (materialParams.debugMode > 1.5) {
+            float s = max(materialParams.debugScale, 1e-4);
+            float t = clamp(0.5 + 0.5 * (d / s), 0.0, 1.0);
+            vec3 c = mix(vec3(1.00, 0.15, 0.15), vec3(0.15, 1.00, 0.15), t);
+            material.baseColor = vec4(c, 0.95);
+            return;
+        }
+        if (materialParams.debugMode > 0.5) {
+            vec3 c = d >= 0.0 ? vec3(0.20, 1.00, 0.20) : vec3(1.00, 0.20, 0.20);
+            material.baseColor = vec4(c, 0.95);
+            return;
+        }
+        if (d < materialParams.clipBias) {
+            discard;
+        }
+        material.baseColor = getColor() * materialParams.tint;
+    }
+}

@@ -274,6 +274,46 @@ fn compile_pick_material(filament_dir: &Path, out_dir: &Path) -> PathBuf {
     material_out
 }
 
+/// Compile the rotate gizmo clipping material using Filament's matc tool.
+fn compile_gizmo_rotate_material(filament_dir: &Path, out_dir: &Path) -> PathBuf {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let material_src = manifest_dir.join("assets").join("gizmoRotate.mat");
+    let material_out = out_dir.join("gizmoRotate.filamat");
+    let matc_path = filament_dir.join("bin").join("matc.exe");
+
+    if !material_src.exists() {
+        panic!(
+            "Gizmo rotate material source not found at {:?}",
+            material_src
+        );
+    }
+    if !matc_path.exists() {
+        panic!("matc tool not found at {:?}", matc_path);
+    }
+
+    println!(
+        "cargo:warning=Compiling gizmo rotate material {} -> {}",
+        material_src.display(),
+        material_out.display()
+    );
+
+    let status = Command::new(&matc_path)
+        .args(["-a", "opengl", "-p", "desktop", "-o"])
+        .arg(&material_out)
+        .arg(&material_src)
+        .status()
+        .expect("Failed to run matc for gizmo rotate material");
+
+    if !status.success() {
+        panic!(
+            "matc failed for gizmo rotate material with status {:?}",
+            status.code()
+        );
+    }
+
+    material_out
+}
+
 /// Compile filagui materials and generate resources header/source.
 fn compile_filagui_resources(
     filament_dir: &Path,
@@ -394,6 +434,14 @@ fn emit_rerun_if_changed(paths: &BuildPaths) {
         paths
             .manifest_dir
             .join("assets")
+            .join("gizmoRotate.mat")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        paths
+            .manifest_dir
+            .join("assets")
             .join("gltf")
             .join("DamagedHelmet.gltf")
             .display()
@@ -489,6 +537,11 @@ fn main() {
     println!(
         "cargo:warning=Pick material compiled at {}",
         pick_material_out.display()
+    );
+    let gizmo_rotate_out = compile_gizmo_rotate_material(&paths.filament_dir, &paths.out_dir);
+    println!(
+        "cargo:warning=Gizmo rotate material compiled at {}",
+        gizmo_rotate_out.display()
     );
 
     let (filagui_generation_root, filagui_resource_dir) =

@@ -46,8 +46,8 @@ Example with override:
 ```json
 {
   "message": "Milestone reached.",
-  "provider": "xai",
-  "voice": "sal",
+  "provider": "openai",
+  "voice": "ash",
   "style": "concise, neutral, technical",
   "show_text": true
 }

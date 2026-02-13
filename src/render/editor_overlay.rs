@@ -27,6 +27,7 @@ const GIZMO_SCALE_XY: i32 = 24;
 const GIZMO_SCALE_XZ: i32 = 25;
 const GIZMO_SCALE_YZ: i32 = 26;
 const GIZMO_SCALE_UNIFORM: i32 = 27;
+const ROTATE_CLIP_DEBUG_MODE: f32 = 0.0;
 
 #[derive(Clone, Copy)]
 pub struct GizmoParams {
@@ -53,6 +54,7 @@ struct HandleEntity {
     base_rotation: Mat3,
     billboard_to_camera: bool,
     pickable: bool,
+    uses_rotate_clip: bool,
     base_alpha: f32,
     _mesh: MeshResource,
     material_instance: MaterialInstance,
@@ -60,6 +62,7 @@ struct HandleEntity {
 
 pub struct EditorOverlay {
     _material: Material,
+    _rotate_material: Material,
     handles: Vec<HandleEntity>,
     layer_overlay_value: u8,
     layer_hidden_value: u8,
@@ -73,17 +76,27 @@ impl EditorOverlay {
         entity_manager: &mut EntityManager,
         layer_overlay_value: u8,
     ) -> Option<Self> {
-        let package = include_bytes!(concat!(env!("OUT_DIR"), "/bakedColor.filamat"));
-        let mut material = engine.create_material(package)?;
+        let base_package = include_bytes!(concat!(env!("OUT_DIR"), "/bakedColor.filamat"));
+        let rotate_package = include_bytes!(concat!(env!("OUT_DIR"), "/gizmoRotate.filamat"));
+        let mut material = engine.create_material(base_package)?;
+        let mut rotate_material = engine.create_material(rotate_package)?;
 
         let mut handles = Vec::new();
         handles.extend(Self::create_axis_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
         handles.extend(Self::create_plane_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
-        handles.extend(Self::create_rotation_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
+        handles.extend(Self::create_rotation_handles(
+            engine,
+            scene,
+            entity_manager,
+            &mut material,
+            &mut rotate_material,
+            layer_overlay_value,
+        ));
         handles.extend(Self::create_misc_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
 
         Some(Self {
             _material: material,
+            _rotate_material: rotate_material,
             handles,
             layer_overlay_value,
             layer_hidden_value: 0x00,
@@ -170,6 +183,16 @@ impl EditorOverlay {
             }
             let rgba = [rgb[0], rgb[1], rgb[2], alpha];
             handle.material_instance.set_float4("tint", rgba);
+            if handle.uses_rotate_clip {
+                handle.material_instance.set_float3("clipCenter", self.params.origin);
+                handle.material_instance.set_float("clipBias", 0.0);
+                handle
+                    .material_instance
+                    .set_float("debugMode", ROTATE_CLIP_DEBUG_MODE);
+                handle
+                    .material_instance
+                    .set_float("debugScale", (self.params.axis_world_len * 1.1).max(0.001));
+            }
         }
     }
 
@@ -225,10 +248,17 @@ impl EditorOverlay {
         base_rotation: Mat3,
         billboard_to_camera: bool,
         pickable: bool,
+        uses_rotate_clip: bool,
         base_alpha: f32,
     ) -> Option<HandleEntity> {
         let mut mi = material.create_instance()?;
         mi.set_float4("tint", [1.0, 1.0, 1.0, base_alpha.clamp(0.0, 1.0)]);
+        if uses_rotate_clip {
+            mi.set_float3("clipCenter", [0.0, 0.0, 0.0]);
+            mi.set_float("clipBias", 0.0);
+            mi.set_float("debugMode", ROTATE_CLIP_DEBUG_MODE);
+            mi.set_float("debugScale", 1.0);
+        }
         let entity = entity_manager.create();
         let builder: RenderableBuilder = engine
             .renderable_builder(1)
@@ -248,6 +278,7 @@ impl EditorOverlay {
             base_rotation,
             billboard_to_camera,
             pickable,
+            uses_rotate_clip,
             base_alpha,
             _mesh: mesh,
             material_instance: mi,
@@ -282,7 +313,7 @@ impl EditorOverlay {
             (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.98], [0.08, 0.08, 0.08], z_col)),
         ];
         for (id, kind, mask, bb, pickable, base_alpha, mesh) in data {
-            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, Mat3::IDENTITY, bb, pickable, base_alpha) {
+            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, Mat3::IDENTITY, bb, pickable, false, base_alpha) {
                 out.push(h);
             }
         }
@@ -309,7 +340,7 @@ impl EditorOverlay {
             (GIZMO_SCALE_YZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180])),
         ];
         for (id, kind, mask, rot, bb, pickable, base_alpha, mesh) in specs {
-            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable, base_alpha) {
+            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable, false, base_alpha) {
                 out.push(h);
             }
         }
@@ -321,6 +352,7 @@ impl EditorOverlay {
         scene: &mut Scene,
         entity_manager: &mut EntityManager,
         material: &mut Material,
+        rotate_material: &mut Material,
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
@@ -328,15 +360,33 @@ impl EditorOverlay {
         let ring_y = create_ring_mesh(engine, 1.10, 0.008, [142, 196, 142, 200], 64, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2));
         let ring_z = create_ring_mesh(engine, 1.10, 0.008, [132, 162, 206, 200], 64, Mat3::IDENTITY);
         let view_ring = create_ring_mesh(engine, 1.22, 0.007, [150, 150, 150, 170], 64, Mat3::IDENTITY);
-        let arcball_disk = create_disk_mesh(engine, 1.03, [210, 210, 210, 10], 48);
-        let specs = [
-            (GIZMO_ROTATE_ARCBALL, PickKind::GizmoRing, 0b010, true, true, 0.10, arcball_disk),
+        let clipped_specs = [
             (GIZMO_ROTATE_X, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_x),
             (GIZMO_ROTATE_Y, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_y),
             (GIZMO_ROTATE_Z, PickKind::GizmoRing, 0b010, false, true, 1.0, ring_z),
-            (GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, 0.75, view_ring),
         ];
-        for (id, kind, mask, billboard, pickable, base_alpha, mesh) in specs {
+        for (id, kind, mask, billboard, pickable, base_alpha, mesh) in clipped_specs {
+            if let Some(h) = Self::add_handle(
+                engine,
+                scene,
+                entity_manager,
+                rotate_material,
+                layer_overlay_value,
+                mesh,
+                id,
+                kind,
+                mask,
+                Mat3::IDENTITY,
+                billboard,
+                pickable,
+                true,
+                base_alpha,
+            ) {
+                out.push(h);
+            }
+        }
+        let regular_specs = [(GIZMO_ROTATE_VIEW, PickKind::GizmoRing, 0b010, true, true, 0.75, view_ring)];
+        for (id, kind, mask, billboard, pickable, base_alpha, mesh) in regular_specs {
             if let Some(h) = Self::add_handle(
                 engine,
                 scene,
@@ -350,6 +400,7 @@ impl EditorOverlay {
                 Mat3::IDENTITY,
                 billboard,
                 pickable,
+                false,
                 base_alpha,
             ) {
                 out.push(h);
@@ -387,6 +438,7 @@ impl EditorOverlay {
             Mat3::IDENTITY,
             true,
             true,
+            false,
             0.75,
         ) {
             out.push(h);
