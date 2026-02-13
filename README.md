@@ -48,6 +48,25 @@ cargo run
 
 First build may download Filament binaries and compile native dependencies.
 
+## Harness Mode
+
+Use harness mode to run automated asset-import checks and optional window-only screenshot capture:
+
+```bash
+cargo run -- --harness-import "C:\path\to\model.gltf" --harness-screenshot "harness\out\model.png" --harness-report "harness\out\model.report.json"
+```
+
+Available harness flags:
+- `--harness-import <path>` required; glTF/GLB to import.
+- `--harness-screenshot <path>` optional; captures only the application window render output.
+- `--harness-report <path>` optional; writes JSON result summary.
+- `--harness-settle-frames <n>` optional; default `30`.
+- `--harness-max-frames <n>` optional; default `360`.
+- `--harness-no-ui` optional; excludes ImGui layer from capture.
+- `--harness-no-light` optional; disables default directional light (enabled by default).
+- `--harness-env <none|adamsplace|artistworkshop>` optional; default `adamsplace`.
+- `--harness-env-hdr <path>` optional; generates runtime KTX from HDR and uses it for environment.
+
 ## Project Layout
 
 ```text

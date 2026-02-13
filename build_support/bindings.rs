@@ -616,6 +616,16 @@ extern "C" {
         buffer_size: u32,
     ) -> bool;
 
+    pub fn filament_renderer_read_pixels_swap_chain(
+        renderer: *mut Renderer,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        out_buffer: *mut u8,
+        buffer_size: u32,
+    ) -> bool;
+
     // ========================================================================
     // RenderableManager - material swap for pick pass
     // ========================================================================

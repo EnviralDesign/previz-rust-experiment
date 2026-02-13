@@ -1773,8 +1773,8 @@ impl RenderableBuilder {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextureInternalFormat {
-    Depth24 = 22,  // Filament DEPTH24 [22]
-    Rgba8 = 30,    // Filament RGBA8 [30]
+    Depth24 = 22, // Filament DEPTH24 [22]
+    Rgba8 = 30,   // Filament RGBA8 [30]
 }
 
 /// Filament Texture::Usage flags (bitmask).
@@ -1869,16 +1869,17 @@ impl Engine {
     /// Get the number of primitives on a renderable entity.
     pub fn renderable_primitive_count(&mut self, entity: Entity) -> i32 {
         unsafe {
-            ffi::filament_renderable_get_primitive_count(
-                self.ptr.as_ptr() as *mut _,
-                entity.id,
-            )
+            ffi::filament_renderable_get_primitive_count(self.ptr.as_ptr() as *mut _, entity.id)
         }
     }
 
     /// Get the material instance at a primitive index on a renderable entity.
     /// Returns a raw pointer (non-owning) since we need to restore it later.
-    pub fn renderable_get_material_raw(&mut self, entity: Entity, primitive_index: i32) -> *mut c_void {
+    pub fn renderable_get_material_raw(
+        &mut self,
+        entity: Entity,
+        primitive_index: i32,
+    ) -> *mut c_void {
         unsafe {
             ffi::filament_renderable_get_material_at(
                 self.ptr.as_ptr() as *mut _,
@@ -1889,7 +1890,12 @@ impl Engine {
     }
 
     /// Set the material instance at a primitive index on a renderable entity.
-    pub fn renderable_set_material(&mut self, entity: Entity, primitive_index: i32, mi: &MaterialInstance) {
+    pub fn renderable_set_material(
+        &mut self,
+        entity: Entity,
+        primitive_index: i32,
+        mi: &MaterialInstance,
+    ) {
         unsafe {
             ffi::filament_renderable_set_material_at(
                 self.ptr.as_ptr() as *mut _,
@@ -1901,7 +1907,12 @@ impl Engine {
     }
 
     /// Restore a previously saved raw material pointer on a renderable.
-    pub fn renderable_restore_material_raw(&mut self, entity: Entity, primitive_index: i32, raw_ptr: *mut c_void) {
+    pub fn renderable_restore_material_raw(
+        &mut self,
+        entity: Entity,
+        primitive_index: i32,
+        raw_ptr: *mut c_void,
+    ) {
         unsafe {
             ffi::filament_renderable_set_material_at(
                 self.ptr.as_ptr() as *mut _,
@@ -1958,6 +1969,29 @@ impl Renderer {
             ffi::filament_renderer_read_pixels(
                 self.ptr.as_ptr() as *mut _,
                 render_target.ptr.as_ptr() as *mut _,
+                x,
+                y,
+                width,
+                height,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        }
+    }
+
+    /// Schedule a pixel readback from the current swap chain frame.
+    /// Call *after* end_frame() and *before* next begin_frame().
+    pub fn read_pixels_swap_chain(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        buffer: &mut [u8],
+    ) -> bool {
+        unsafe {
+            ffi::filament_renderer_read_pixels_swap_chain(
+                self.ptr.as_ptr() as *mut _,
                 x,
                 y,
                 width,

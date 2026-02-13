@@ -101,8 +101,20 @@ impl EditorOverlay {
         let mut rotate_material = engine.create_material(rotate_package)?;
 
         let mut handles = Vec::new();
-        handles.extend(Self::create_axis_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
-        handles.extend(Self::create_plane_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
+        handles.extend(Self::create_axis_handles(
+            engine,
+            scene,
+            entity_manager,
+            &mut material,
+            layer_overlay_value,
+        ));
+        handles.extend(Self::create_plane_handles(
+            engine,
+            scene,
+            entity_manager,
+            &mut material,
+            layer_overlay_value,
+        ));
         handles.extend(Self::create_rotation_handles(
             engine,
             scene,
@@ -111,7 +123,13 @@ impl EditorOverlay {
             &mut rotate_material,
             layer_overlay_value,
         ));
-        handles.extend(Self::create_misc_handles(engine, scene, entity_manager, &mut material, layer_overlay_value));
+        handles.extend(Self::create_misc_handles(
+            engine,
+            scene,
+            entity_manager,
+            &mut material,
+            layer_overlay_value,
+        ));
 
         Some(Self {
             _material: material,
@@ -186,9 +204,7 @@ impl EditorOverlay {
         for handle in &mut self.handles {
             let fade = Self::handle_fade_factor_for(camera_forward, handle.handle_id);
             let mode_visible = (handle.mode_mask & active_mode_mask) != 0;
-            let visible = self.params.visible
-                && mode_visible
-                && fade > 0.001;
+            let visible = self.params.visible && mode_visible && fade > 0.001;
             let value = if visible {
                 self.layer_overlay_value
             } else {
@@ -202,7 +218,8 @@ impl EditorOverlay {
                 ([1.0, 1.0, 1.0], 1.0)
             };
             let (rgb, alpha_mult) = if is_highlighted
-                && (handle.handle_id == GIZMO_ROTATE_VIEW || handle.handle_id == GIZMO_SCALE_UNIFORM)
+                && (handle.handle_id == GIZMO_ROTATE_VIEW
+                    || handle.handle_id == GIZMO_SCALE_UNIFORM)
             {
                 ([1.50, 1.50, 1.50], 1.20)
             } else {
@@ -216,7 +233,9 @@ impl EditorOverlay {
             let rgba = [rgb[0], rgb[1], rgb[2], alpha];
             handle.material_instance.set_float4("tint", rgba);
             if handle.uses_rotate_clip {
-                handle.material_instance.set_float3("clipCenter", self.params.origin);
+                handle
+                    .material_instance
+                    .set_float3("clipCenter", self.params.origin);
                 handle.material_instance.set_float("clipBias", 0.0);
                 handle
                     .material_instance
@@ -311,7 +330,10 @@ impl EditorOverlay {
                 line_state.positions[base + 2] = collapse;
                 line_state.positions[base + 3] = collapse;
             }
-            handle._mesh.vertex.set_buffer_at(0, &line_state.positions, 0);
+            handle
+                ._mesh
+                .vertex
+                .set_buffer_at(0, &line_state.positions, 0);
         }
     }
 
@@ -388,7 +410,12 @@ impl EditorOverlay {
             .renderable_builder(1)
             .bounding_box([0.0, 0.0, 0.0], [2.0, 2.0, 2.0])
             .material(0, &mut mi)
-            .geometry(0, PrimitiveType::Triangles, &mut mesh.vertex, &mut mesh.index)
+            .geometry(
+                0,
+                PrimitiveType::Triangles,
+                &mut mesh.vertex,
+                &mut mesh.index,
+            )
             .layer_mask(0xFF, layer_overlay_value)
             .culling(false);
         builder.build(entity);
@@ -474,9 +501,27 @@ impl EditorOverlay {
         let y_col = [142, 196, 142, 255];
         let z_col = [132, 162, 206, 255];
         let shaft_specs = [
-            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, x_col, Vec3::X),
-            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, y_col, Vec3::Y),
-            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, z_col, Vec3::Z),
+            (
+                GIZMO_TRANSLATE_X,
+                PickKind::GizmoAxis,
+                0b001,
+                x_col,
+                Vec3::X,
+            ),
+            (
+                GIZMO_TRANSLATE_Y,
+                PickKind::GizmoAxis,
+                0b001,
+                y_col,
+                Vec3::Y,
+            ),
+            (
+                GIZMO_TRANSLATE_Z,
+                PickKind::GizmoAxis,
+                0b001,
+                z_col,
+                Vec3::Z,
+            ),
             (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, x_col, Vec3::X),
             (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, y_col, Vec3::Y),
             (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, z_col, Vec3::Z),
@@ -506,12 +551,60 @@ impl EditorOverlay {
             }
         }
         let head_specs = [
-            (GIZMO_TRANSLATE_X, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [1.0, 0.0, 0.0], 1, 0.12, 0.045, x_col)),
-            (GIZMO_TRANSLATE_Y, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 1.0, 0.0], 2, 0.12, 0.045, y_col)),
-            (GIZMO_TRANSLATE_Z, PickKind::GizmoAxis, 0b001, false, true, 0.95, create_pyramid_mesh(engine, [0.0, 0.0, 1.0], 3, 0.12, 0.045, z_col)),
-            (GIZMO_SCALE_X, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.98, 0.0, 0.0], [0.08, 0.08, 0.08], x_col)),
-            (GIZMO_SCALE_Y, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.98, 0.0], [0.08, 0.08, 0.08], y_col)),
-            (GIZMO_SCALE_Z, PickKind::GizmoAxis, 0b100, false, true, 0.95, create_box_mesh(engine, [0.0, 0.0, 0.98], [0.08, 0.08, 0.08], z_col)),
+            (
+                GIZMO_TRANSLATE_X,
+                PickKind::GizmoAxis,
+                0b001,
+                false,
+                true,
+                0.95,
+                create_pyramid_mesh(engine, [1.0, 0.0, 0.0], 1, 0.12, 0.045, x_col),
+            ),
+            (
+                GIZMO_TRANSLATE_Y,
+                PickKind::GizmoAxis,
+                0b001,
+                false,
+                true,
+                0.95,
+                create_pyramid_mesh(engine, [0.0, 1.0, 0.0], 2, 0.12, 0.045, y_col),
+            ),
+            (
+                GIZMO_TRANSLATE_Z,
+                PickKind::GizmoAxis,
+                0b001,
+                false,
+                true,
+                0.95,
+                create_pyramid_mesh(engine, [0.0, 0.0, 1.0], 3, 0.12, 0.045, z_col),
+            ),
+            (
+                GIZMO_SCALE_X,
+                PickKind::GizmoAxis,
+                0b100,
+                false,
+                true,
+                0.95,
+                create_box_mesh(engine, [0.98, 0.0, 0.0], [0.08, 0.08, 0.08], x_col),
+            ),
+            (
+                GIZMO_SCALE_Y,
+                PickKind::GizmoAxis,
+                0b100,
+                false,
+                true,
+                0.95,
+                create_box_mesh(engine, [0.0, 0.98, 0.0], [0.08, 0.08, 0.08], y_col),
+            ),
+            (
+                GIZMO_SCALE_Z,
+                PickKind::GizmoAxis,
+                0b100,
+                false,
+                true,
+                0.95,
+                create_box_mesh(engine, [0.0, 0.0, 0.98], [0.08, 0.08, 0.08], z_col),
+            ),
         ];
         for (id, kind, mask, bb, pickable, base_alpha, mesh) in head_specs {
             if let Some(h) = Self::add_handle(
@@ -545,18 +638,78 @@ impl EditorOverlay {
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
         let mut add = |id, color: [u8; 4], mode| {
-            (id, PickKind::GizmoPlane, mode, Mat3::IDENTITY, false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], color))
+            (
+                id,
+                PickKind::GizmoPlane,
+                mode,
+                Mat3::IDENTITY,
+                false,
+                true,
+                0.85,
+                create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], color),
+            )
         };
         let specs = [
             add(GIZMO_TRANSLATE_XY, [255, 255, 80, 180], 0b001),
             add(GIZMO_SCALE_XY, [255, 255, 80, 180], 0b100),
-            (GIZMO_TRANSLATE_XZ, PickKind::GizmoPlane, 0b001, Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [255, 120, 80, 180])),
-            (GIZMO_SCALE_XZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [255, 120, 80, 180])),
-            (GIZMO_TRANSLATE_YZ, PickKind::GizmoPlane, 0b001, Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180])),
-            (GIZMO_SCALE_YZ, PickKind::GizmoPlane, 0b100, Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2), false, true, 0.85, create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180])),
+            (
+                GIZMO_TRANSLATE_XZ,
+                PickKind::GizmoPlane,
+                0b001,
+                Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                false,
+                true,
+                0.85,
+                create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [255, 120, 80, 180]),
+            ),
+            (
+                GIZMO_SCALE_XZ,
+                PickKind::GizmoPlane,
+                0b100,
+                Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                false,
+                true,
+                0.85,
+                create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [255, 120, 80, 180]),
+            ),
+            (
+                GIZMO_TRANSLATE_YZ,
+                PickKind::GizmoPlane,
+                0b001,
+                Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+                false,
+                true,
+                0.85,
+                create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180]),
+            ),
+            (
+                GIZMO_SCALE_YZ,
+                PickKind::GizmoPlane,
+                0b100,
+                Mat3::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+                false,
+                true,
+                0.85,
+                create_quad_mesh(engine, [0.34, 0.34, 0.0], [0.20, 0.20], [80, 255, 255, 180]),
+            ),
         ];
         for (id, kind, mask, rot, bb, pickable, base_alpha, mesh) in specs {
-            if let Some(h) = Self::add_handle(engine, scene, entity_manager, material, layer_overlay_value, mesh, id, kind, mask, rot, bb, pickable, false, base_alpha) {
+            if let Some(h) = Self::add_handle(
+                engine,
+                scene,
+                entity_manager,
+                material,
+                layer_overlay_value,
+                mesh,
+                id,
+                kind,
+                mask,
+                rot,
+                bb,
+                pickable,
+                false,
+                base_alpha,
+            ) {
                 out.push(h);
             }
         }
@@ -581,7 +734,11 @@ impl EditorOverlay {
                 true,
                 1.0,
                 [214, 128, 128, 200],
-                create_ring_segments(1.10, 128, Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                create_ring_segments(
+                    1.10,
+                    128,
+                    Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                ),
             ),
             (
                 GIZMO_ROTATE_Y,
@@ -591,7 +748,11 @@ impl EditorOverlay {
                 true,
                 1.0,
                 [142, 196, 142, 200],
-                create_ring_segments(1.10, 128, Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                create_ring_segments(
+                    1.10,
+                    128,
+                    Mat3::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                ),
             ),
             (
                 GIZMO_ROTATE_Z,
@@ -671,8 +832,12 @@ impl EditorOverlay {
         layer_overlay_value: u8,
     ) -> Vec<HandleEntity> {
         let mut out = Vec::new();
-        let center_move_mesh =
-            create_box_mesh(engine, [0.0, 0.0, 0.0], [0.09, 0.09, 0.09], [236, 236, 236, 220]);
+        let center_move_mesh = create_box_mesh(
+            engine,
+            [0.0, 0.0, 0.0],
+            [0.09, 0.09, 0.09],
+            [236, 236, 236, 220],
+        );
         if let Some(h) = Self::add_handle(
             engine,
             scene,
@@ -765,7 +930,8 @@ impl EditorOverlay {
             } else if dot_abs >= rotate_fade_end_dot {
                 0.0
             } else {
-                1.0 - ((dot_abs - rotate_fade_start_dot) / (rotate_fade_end_dot - rotate_fade_start_dot))
+                1.0 - ((dot_abs - rotate_fade_start_dot)
+                    / (rotate_fade_end_dot - rotate_fade_start_dot))
             }
         };
 
@@ -846,10 +1012,18 @@ fn create_mesh(
         .buffer_type(IndexType::UShort)
         .build()?;
     ib.set_buffer(indices, 0);
-    Some(MeshResource { vertex: vb, index: ib })
+    Some(MeshResource {
+        vertex: vb,
+        index: ib,
+    })
 }
 
-fn create_box_mesh(engine: &mut Engine, center: [f32; 3], size: [f32; 3], color: [u8; 4]) -> MeshResource {
+fn create_box_mesh(
+    engine: &mut Engine,
+    center: [f32; 3],
+    size: [f32; 3],
+    color: [u8; 4],
+) -> MeshResource {
     let cx = center[0];
     let cy = center[1];
     let cz = center[2];
@@ -868,11 +1042,7 @@ fn create_box_mesh(engine: &mut Engine, center: [f32; 3], size: [f32; 3], color:
     ];
     let c = [color; 8];
     let idx: [u16; 36] = [
-        0, 1, 2, 0, 2, 3,
-        4, 6, 5, 4, 7, 6,
-        0, 4, 5, 0, 5, 1,
-        1, 5, 6, 1, 6, 2,
-        2, 6, 7, 2, 7, 3,
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 1, 5, 6, 1, 6, 2, 2, 6, 7, 2, 7, 3,
         3, 7, 4, 3, 4, 0,
     ];
     create_mesh(engine, &p, &c, &idx).expect("box mesh")
@@ -913,18 +1083,16 @@ fn create_pyramid_mesh(
         p4.to_array(),
     ];
     let colors = [color; 5];
-    let indices: [u16; 18] = [
-        0, 1, 2,
-        0, 2, 3,
-        0, 3, 4,
-        0, 4, 1,
-        1, 4, 3,
-        1, 3, 2,
-    ];
+    let indices: [u16; 18] = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 4, 3, 1, 3, 2];
     create_mesh(engine, &positions, &colors, &indices).expect("pyramid mesh")
 }
 
-fn create_quad_mesh(engine: &mut Engine, center: [f32; 3], size: [f32; 2], color: [u8; 4]) -> MeshResource {
+fn create_quad_mesh(
+    engine: &mut Engine,
+    center: [f32; 3],
+    size: [f32; 2],
+    color: [u8; 4],
+) -> MeshResource {
     let cx = center[0];
     let cy = center[1];
     let cz = center[2];
@@ -941,25 +1109,14 @@ fn create_quad_mesh(engine: &mut Engine, center: [f32; 3], size: [f32; 2], color
     create_mesh(engine, &p, &c, &idx).expect("quad mesh")
 }
 
-fn create_line_quad_mesh(
-    engine: &mut Engine,
-    segments: usize,
-    color: [u8; 4],
-) -> MeshResource {
+fn create_line_quad_mesh(engine: &mut Engine, segments: usize, color: [u8; 4]) -> MeshResource {
     let count = segments.max(1);
     let positions = vec![[0.0, 0.0, 0.0]; count * 4];
     let colors = vec![color; count * 4];
     let mut indices = Vec::with_capacity(count * 6);
     for i in 0..count {
         let base = (i * 4) as u16;
-        indices.extend_from_slice(&[
-            base,
-            base + 2,
-            base + 3,
-            base,
-            base + 3,
-            base + 1,
-        ]);
+        indices.extend_from_slice(&[base, base + 2, base + 3, base, base + 3, base + 1]);
     }
     create_mesh(engine, &positions, &colors, &indices).expect("ring mesh")
 }
@@ -1043,14 +1200,12 @@ fn write_segment_quad(
     }
     side = side.normalize();
 
-    let world_per_pixel_a = 2.0
-        * (camera_position - a).length().max(0.01)
-        * (fov_y_radians * 0.5).tan()
-        / viewport_height.max(1.0);
-    let world_per_pixel_b = 2.0
-        * (camera_position - b).length().max(0.01)
-        * (fov_y_radians * 0.5).tan()
-        / viewport_height.max(1.0);
+    let world_per_pixel_a =
+        2.0 * (camera_position - a).length().max(0.01) * (fov_y_radians * 0.5).tan()
+            / viewport_height.max(1.0);
+    let world_per_pixel_b =
+        2.0 * (camera_position - b).length().max(0.01) * (fov_y_radians * 0.5).tan()
+            / viewport_height.max(1.0);
     let offset_a = side * (pixel_width * 0.5 * world_per_pixel_a);
     let offset_b = side * (pixel_width * 0.5 * world_per_pixel_b);
 
@@ -1062,7 +1217,12 @@ fn write_segment_quad(
     true
 }
 
-fn create_disk_mesh(engine: &mut Engine, radius: f32, color: [u8; 4], segments: usize) -> MeshResource {
+fn create_disk_mesh(
+    engine: &mut Engine,
+    radius: f32,
+    color: [u8; 4],
+    segments: usize,
+) -> MeshResource {
     let n = segments.max(12);
     let mut positions = Vec::with_capacity(n + 1);
     let mut colors = Vec::with_capacity(n + 1);

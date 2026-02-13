@@ -1587,6 +1587,42 @@ bool filament_renderer_read_pixels(
     return true; // Caller must flushAndWait() to complete
 }
 
+// Synchronous readback from the current swap chain frame.
+// Must be called AFTER endFrame() and BEFORE the next beginFrame().
+// Caller must call engine->flushAndWait() afterwards to ensure completion.
+bool filament_renderer_read_pixels_swap_chain(
+    Renderer* renderer,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    uint8_t* out_buffer,
+    uint32_t buffer_size
+) {
+    if (!renderer || !out_buffer || buffer_size == 0) {
+        return false;
+    }
+    const uint32_t pixel_count = width * height;
+    const uint32_t required = pixel_count * 4; // RGBA8
+    if (buffer_size < required) {
+        return false;
+    }
+    std::atomic<bool> done{false};
+    auto pbd = backend::PixelBufferDescriptor(
+        out_buffer,
+        required,
+        backend::PixelDataFormat::RGBA,
+        backend::PixelDataType::UBYTE,
+        [](void* /*buffer*/, size_t /*size*/, void* user) {
+            auto* flag = static_cast<std::atomic<bool>*>(user);
+            flag->store(true, std::memory_order_release);
+        },
+        &done
+    );
+    renderer->readPixels(x, y, width, height, std::move(pbd));
+    return true; // Caller must flushAndWait() to complete
+}
+
 // ============================================================================
 // RenderableManager - material swap for pick pass
 // ============================================================================

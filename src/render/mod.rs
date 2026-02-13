@@ -7,11 +7,12 @@ pub use editor_overlay::GizmoParams;
 pub use pick::{PickHit, PickKey, PickKind, PickSystem};
 
 use crate::filament::{
-    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, Renderer, Scene, Skybox,
-    SwapChain, Texture, View, MaterialInstance,
+    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, MaterialInstance, Renderer, Scene,
+    Skybox, SwapChain, Texture, TextureInternalFormat, TextureUsage, View,
 };
 use std::ffi::c_void;
 use std::ffi::CString;
+use std::path::Path;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -66,6 +67,8 @@ pub struct RenderContext {
     pick_view: Option<View>,
     pending_pick_entities: Option<Vec<(PickKey, Vec<Entity>)>>,
     editor_overlay: Option<editor_overlay::EditorOverlay>,
+    viewport_width: u32,
+    viewport_height: u32,
 }
 
 const LAYER_SCENE: u8 = 0x01;
@@ -86,7 +89,9 @@ impl RenderContext {
             .ok_or(RenderError::RendererCreateFailed)?;
         renderer.set_clear_options(0.1, 0.1, 0.2, 1.0, true, true);
 
-        let mut scene = engine.create_scene().ok_or(RenderError::SceneCreateFailed)?;
+        let mut scene = engine
+            .create_scene()
+            .ok_or(RenderError::SceneCreateFailed)?;
         let mut view = engine.create_view().ok_or(RenderError::ViewCreateFailed)?;
 
         let mut entity_manager = engine
@@ -158,6 +163,8 @@ impl RenderContext {
             pick_view,
             pending_pick_entities: None,
             editor_overlay,
+            viewport_width: window_size.width.max(1),
+            viewport_height: window_size.height.max(1),
         })
     }
 
@@ -170,6 +177,8 @@ impl RenderContext {
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
+        self.viewport_width = new_size.width.max(1);
+        self.viewport_height = new_size.height.max(1);
         self.view
             .set_viewport(0, 0, new_size.width, new_size.height);
         let aspect = new_size.width as f64 / new_size.height as f64;
@@ -392,12 +401,7 @@ impl RenderContext {
                     if let Some(overlay) = &mut self.editor_overlay {
                         overlay.set_pick_width_mode(true);
                     }
-                    ps.render_pick_pass(
-                        &mut self.engine,
-                        &mut self.renderer,
-                        pv,
-                        &pickable,
-                    );
+                    ps.render_pick_pass(&mut self.engine, &mut self.renderer, pv, &pickable);
                     if let Some(overlay) = &mut self.editor_overlay {
                         overlay.set_pick_width_mode(false);
                     }
@@ -462,16 +466,13 @@ impl RenderContext {
         wrap_repeat_u: bool,
         wrap_repeat_v: bool,
     ) -> bool {
-        let Some(texture) = self
-            .engine
-            .bind_material_texture_from_ktx(
-                material_instance,
-                texture_param,
-                ktx_path,
-                wrap_repeat_u,
-                wrap_repeat_v,
-            )
-        else {
+        let Some(texture) = self.engine.bind_material_texture_from_ktx(
+            material_instance,
+            texture_param,
+            ktx_path,
+            wrap_repeat_u,
+            wrap_repeat_v,
+        ) else {
             return false;
         };
         self.material_textures.push(texture);
@@ -530,7 +531,9 @@ impl RenderContext {
         if let Some(new_scene) = self.engine.create_scene() {
             self.scene = new_scene;
         } else {
-            log::error!("Failed to create replacement scene during clear_scene; keeping existing scene.");
+            log::error!(
+                "Failed to create replacement scene during clear_scene; keeping existing scene."
+            );
             return;
         }
         self.view.set_scene(&mut self.scene);
@@ -574,7 +577,10 @@ impl RenderContext {
     ///
     /// `pickable_entities` maps (object_id, entities) for each pickable scene object.
     pub fn execute_pick_pass(&mut self, pickable_entities: &[(PickKey, Vec<Entity>)]) {
-        let has_pending = self.pick_system.as_ref().map_or(false, |ps| ps.has_pending_pick());
+        let has_pending = self
+            .pick_system
+            .as_ref()
+            .map_or(false, |ps| ps.has_pending_pick());
         if !has_pending {
             return;
         }
@@ -599,6 +605,103 @@ impl RenderContext {
         if let Some(overlay) = &mut self.editor_overlay {
             overlay.set_params(&mut self.engine, params);
         }
+    }
+
+    pub fn capture_window_png(&mut self, path: &Path, include_ui: bool) -> Result<(), String> {
+        let width = self.viewport_width.max(1);
+        let height = self.viewport_height.max(1);
+        let Some(color) = self.engine.create_texture_2d(
+            width,
+            height,
+            TextureInternalFormat::Rgba8,
+            TextureUsage::or3(
+                TextureUsage::ColorAttachment,
+                TextureUsage::Sampleable,
+                TextureUsage::BlitSrc,
+            ),
+        ) else {
+            return Err("failed to create capture color texture".to_string());
+        };
+        let Some(depth) = self.engine.create_texture_2d(
+            width,
+            height,
+            TextureInternalFormat::Depth24,
+            TextureUsage::DepthAttachment as u32,
+        ) else {
+            return Err("failed to create capture depth texture".to_string());
+        };
+        let Some(render_target) = self.engine.create_render_target(&color, Some(&depth)) else {
+            return Err("failed to create capture render target".to_string());
+        };
+
+        self.view.set_render_target(Some(&render_target));
+        if let Some(overlay_view) = &mut self.overlay_view {
+            overlay_view.set_render_target(Some(&render_target));
+        }
+        if include_ui {
+            if let Some(ui_view) = &mut self.ui_view {
+                ui_view.set_render_target(Some(&render_target));
+            }
+        }
+
+        let did_render = self.renderer.begin_frame(&mut self.swap_chain);
+        if did_render {
+            self.renderer.render(&self.view);
+            if let Some(overlay_view) = &self.overlay_view {
+                self.renderer.render(overlay_view);
+            }
+            if include_ui {
+                if let Some(ui_view) = &self.ui_view {
+                    self.renderer.render(ui_view);
+                }
+            }
+            self.renderer.end_frame();
+        }
+
+        self.view.set_render_target(None);
+        if let Some(overlay_view) = &mut self.overlay_view {
+            overlay_view.set_render_target(None);
+        }
+        if include_ui {
+            if let Some(ui_view) = &mut self.ui_view {
+                ui_view.set_render_target(None);
+            }
+        }
+
+        if !did_render {
+            return Err("capture frame unavailable: begin_frame returned false".to_string());
+        }
+
+        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+        if !self
+            .renderer
+            .read_pixels(&render_target, 0, 0, width, height, &mut pixels)
+        {
+            return Err("failed scheduling capture readback".to_string());
+        }
+        self.engine.flush_and_wait();
+
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "failed creating screenshot directory '{}': {}",
+                        parent.display(),
+                        err
+                    )
+                })?;
+            }
+        }
+
+        image::save_buffer_with_format(
+            path,
+            &pixels,
+            width,
+            height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .map_err(|err| format!("failed writing screenshot '{}': {}", path.display(), err))
     }
 }
 

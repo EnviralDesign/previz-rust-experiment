@@ -105,7 +105,7 @@ impl AssetManager {
         path: &str,
         object_id: u64,
     ) -> Result<LoadedAsset, AssetError> {
-        let gltf_bytes = load_gltf_bytes(path)?;
+        let (gltf_path, gltf_bytes) = load_gltf_bytes(path)?;
         if self.material_provider.is_none() {
             self.material_provider = GltfMaterialProvider::create_jit(engine, false);
         }
@@ -123,8 +123,9 @@ impl AssetManager {
 
         let mut asset_loader = GltfAssetLoader::create(engine, material_provider, entity_manager)
             .ok_or(AssetError::CreateAssetLoader)?;
-        let mut resource_loader =
-            GltfResourceLoader::create(engine, None, true).ok_or(AssetError::CreateResourceLoader)?;
+        let gltf_path_string = gltf_path.to_string_lossy().to_string();
+        let mut resource_loader = GltfResourceLoader::create(engine, Some(&gltf_path_string), true)
+            .ok_or(AssetError::CreateResourceLoader)?;
         resource_loader.add_texture_provider("image/png", texture_provider);
         resource_loader.add_texture_provider("image/jpeg", texture_provider);
 
@@ -192,11 +193,20 @@ impl Drop for AssetManager {
     }
 }
 
-fn load_gltf_bytes(path: &str) -> Result<Vec<u8>, AssetError> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let gltf_path = manifest_dir.join(path);
-    std::fs::read(&gltf_path).map_err(|source| AssetError::Read {
+fn load_gltf_bytes(path: &str) -> Result<(PathBuf, Vec<u8>), AssetError> {
+    let gltf_path = resolve_gltf_path(path);
+    let bytes = std::fs::read(&gltf_path).map_err(|source| AssetError::Read {
         path: gltf_path.display().to_string(),
         source,
-    })
+    })?;
+    Ok((gltf_path, bytes))
+}
+
+fn resolve_gltf_path(path: &str) -> PathBuf {
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(candidate)
+    }
 }

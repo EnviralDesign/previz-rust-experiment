@@ -20,3 +20,6 @@ Thumbs.db
 
 # Generated runtime texture cache artifacts (do not commit)
 /assets/cache/
+
+# Harness outputs
+/harness/out/

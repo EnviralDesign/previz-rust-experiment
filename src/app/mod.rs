@@ -12,6 +12,7 @@ use crate::scene::{
 use crate::ui::{MaterialParams, UiState, MATERIAL_TEXTURE_PARAMS};
 use glam::{EulerRot, Mat3, Vec2, Vec3};
 use input::InputState;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use timing::FrameTiming;
 
@@ -28,7 +29,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 enum SceneCommand {
-    AddAsset { path: String },
+    AddAsset {
+        path: String,
+    },
     AddDirectionalLight {
         name: String,
         data: DirectionalLightData,
@@ -63,8 +66,12 @@ enum SceneCommand {
     DeleteObject {
         index: usize,
     },
-    SaveScene { path: PathBuf },
-    LoadScene { path: PathBuf },
+    SaveScene {
+        path: PathBuf,
+    },
+    LoadScene {
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +178,104 @@ enum CommandError {
     TextureBindingSourceEmpty,
 }
 
+#[derive(Debug, Clone)]
+struct HarnessConfig {
+    import_path: String,
+    screenshot_path: Option<PathBuf>,
+    report_path: Option<PathBuf>,
+    settle_frames: u32,
+    max_frames: u32,
+    include_ui: bool,
+    add_default_light: bool,
+    environment_preset: HarnessEnvironmentPreset,
+    environment_hdr_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+enum HarnessEnvironmentPreset {
+    None,
+    AdamsPlace,
+    ArtistWorkShop,
+}
+
+#[derive(Debug, Clone)]
+struct HarnessState {
+    config: HarnessConfig,
+    frame_count: u32,
+    setup_attempted: bool,
+    setup_success: bool,
+    setup_error: Option<String>,
+    import_attempted: bool,
+    import_success: bool,
+    import_error: Option<String>,
+    screenshot_attempted: bool,
+    screenshot_success: bool,
+    screenshot_error: Option<String>,
+    finished: bool,
+    exit_code: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct HarnessReport {
+    setup_success: bool,
+    setup_error: Option<String>,
+    light_enabled: bool,
+    environment_preset: HarnessEnvironmentPreset,
+    environment_hdr_path: Option<String>,
+    import_path: String,
+    frame_count: u32,
+    import_success: bool,
+    import_error: Option<String>,
+    screenshot_path: Option<String>,
+    screenshot_success: bool,
+    screenshot_error: Option<String>,
+}
+
+impl HarnessState {
+    fn new(config: HarnessConfig) -> Self {
+        Self {
+            config,
+            frame_count: 0,
+            setup_attempted: false,
+            setup_success: false,
+            setup_error: None,
+            import_attempted: false,
+            import_success: false,
+            import_error: None,
+            screenshot_attempted: false,
+            screenshot_success: false,
+            screenshot_error: None,
+            finished: false,
+            exit_code: 0,
+        }
+    }
+
+    fn report(&self) -> HarnessReport {
+        HarnessReport {
+            setup_success: self.setup_success,
+            setup_error: self.setup_error.clone(),
+            light_enabled: self.config.add_default_light,
+            environment_preset: self.config.environment_preset,
+            environment_hdr_path: self.config.environment_hdr_path.clone(),
+            import_path: self.config.import_path.clone(),
+            frame_count: self.frame_count,
+            import_success: self.import_success,
+            import_error: self.import_error.clone(),
+            screenshot_path: self
+                .config
+                .screenshot_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            screenshot_success: if self.config.screenshot_path.is_some() {
+                self.screenshot_success
+            } else {
+                true
+            },
+            screenshot_error: self.screenshot_error.clone(),
+        }
+    }
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     assets: AssetManager,
@@ -198,6 +303,7 @@ pub struct App {
     next_frame_time: Instant,
     close_requested: bool,
     render: Option<RenderContext>,
+    harness: Option<HarnessState>,
 }
 
 impl Drop for App {
@@ -212,7 +318,12 @@ impl Drop for App {
 }
 
 impl App {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::new_with_harness(None)
+    }
+
+    fn new_with_harness(harness: Option<HarnessConfig>) -> Self {
         Self {
             window: None,
             assets: AssetManager::new(),
@@ -240,6 +351,7 @@ impl App {
             next_frame_time: Instant::now(),
             close_requested: false,
             render: None,
+            harness: harness.map(HarnessState::new),
         }
     }
 
@@ -487,9 +599,11 @@ impl App {
             TransformToolMode::Translate => {
                 if let Some(axis) = Self::gizmo_axis_from_handle(state_snapshot.handle) {
                     let axis_unit = Self::axis_unit(axis);
-                    if let Some(t) =
-                        self.closest_axis_param_from_screen(mouse, state_snapshot.gizmo_origin, axis_unit)
-                    {
+                    if let Some(t) = self.closest_axis_param_from_screen(
+                        mouse,
+                        state_snapshot.gizmo_origin,
+                        axis_unit,
+                    ) {
                         let delta = t - state_snapshot.start_axis_param;
                         position[0] += axis_unit[0] * delta;
                         position[1] += axis_unit[1] * delta;
@@ -577,7 +691,8 @@ impl App {
                 let Some(hit) = self.ray_plane_hit(mouse, state_snapshot.gizmo_origin, axis) else {
                     return;
                 };
-                let start_vec = Vec3::from_array(state_snapshot.start_hit_world) - Vec3::from_array(state_snapshot.gizmo_origin);
+                let start_vec = Vec3::from_array(state_snapshot.start_hit_world)
+                    - Vec3::from_array(state_snapshot.gizmo_origin);
                 let cur_vec = Vec3::from_array(hit) - Vec3::from_array(state_snapshot.gizmo_origin);
                 if start_vec.length_squared() <= 1e-10 || cur_vec.length_squared() <= 1e-10 {
                     return;
@@ -600,11 +715,14 @@ impl App {
             TransformToolMode::Scale => {
                 if let Some(axis_id) = Self::gizmo_axis_from_handle(state_snapshot.handle) {
                     let axis_unit = Self::axis_unit(axis_id);
-                    if let Some(t) =
-                        self.closest_axis_param_from_screen(mouse, state_snapshot.gizmo_origin, axis_unit)
-                    {
+                    if let Some(t) = self.closest_axis_param_from_screen(
+                        mouse,
+                        state_snapshot.gizmo_origin,
+                        axis_unit,
+                    ) {
                         let delta = t - state_snapshot.start_axis_param;
-                        let factor = (1.0 + (delta / state_snapshot.axis_world_length.max(0.001))).max(0.01);
+                        let factor =
+                            (1.0 + (delta / state_snapshot.axis_world_length.max(0.001))).max(0.01);
                         match axis_id {
                             1 => scale[0] = state_snapshot.start_scale[0] * factor,
                             2 => scale[1] = state_snapshot.start_scale[1] * factor,
@@ -613,19 +731,24 @@ impl App {
                         }
                     }
                 } else if state_snapshot.handle == GIZMO_SCALE_UNIFORM {
-                    let Some(center_screen) = self.world_to_screen(state_snapshot.gizmo_origin) else {
+                    let Some(center_screen) = self.world_to_screen(state_snapshot.gizmo_origin)
+                    else {
                         return;
                     };
-                    let radius = Vec2::new(mouse.0 - center_screen[0], mouse.1 - center_screen[1]).length();
+                    let radius =
+                        Vec2::new(mouse.0 - center_screen[0], mouse.1 - center_screen[1]).length();
                     if state_snapshot.uniform_scale_start_radius > 1e-4 && radius.is_finite() {
-                        let factor = (radius / state_snapshot.uniform_scale_start_radius).clamp(0.01, 100.0);
+                        let factor =
+                            (radius / state_snapshot.uniform_scale_start_radius).clamp(0.01, 100.0);
                         scale = [
                             state_snapshot.start_scale[0] * factor,
                             state_snapshot.start_scale[1] * factor,
                             state_snapshot.start_scale[2] * factor,
                         ];
                     }
-                } else if let Some((a_axis, b_axis)) = Self::gizmo_plane_axes_from_handle(state_snapshot.handle) {
+                } else if let Some((a_axis, b_axis)) =
+                    Self::gizmo_plane_axes_from_handle(state_snapshot.handle)
+                {
                     let Some(hit) = self.ray_plane_hit(
                         mouse,
                         state_snapshot.gizmo_origin,
@@ -643,13 +766,16 @@ impl App {
                     let fa = (1.0 + (da / state_snapshot.axis_world_length.max(0.001))).max(0.01);
                     let fb = (1.0 + (db / state_snapshot.axis_world_length.max(0.001))).max(0.01);
                     if a_axis[0] > 0.5 || b_axis[0] > 0.5 {
-                        scale[0] = state_snapshot.start_scale[0] * if a_axis[0] > 0.5 { fa } else { fb };
+                        scale[0] =
+                            state_snapshot.start_scale[0] * if a_axis[0] > 0.5 { fa } else { fb };
                     }
                     if a_axis[1] > 0.5 || b_axis[1] > 0.5 {
-                        scale[1] = state_snapshot.start_scale[1] * if a_axis[1] > 0.5 { fa } else { fb };
+                        scale[1] =
+                            state_snapshot.start_scale[1] * if a_axis[1] > 0.5 { fa } else { fb };
                     }
                     if a_axis[2] > 0.5 || b_axis[2] > 0.5 {
-                        scale[2] = state_snapshot.start_scale[2] * if a_axis[2] > 0.5 { fa } else { fb };
+                        scale[2] =
+                            state_snapshot.start_scale[2] * if a_axis[2] > 0.5 { fa } else { fb };
                     }
                 }
             }
@@ -668,7 +794,8 @@ impl App {
         if self.gizmo_drag_state.is_some() || self.gizmo_active_axis == GIZMO_NONE {
             return;
         }
-        let Some((_, start_position, start_rotation_deg, start_scale)) = self.selected_asset_transform()
+        let Some((_, start_position, start_rotation_deg, start_scale)) =
+            self.selected_asset_transform()
         else {
             return;
         };
@@ -855,12 +982,14 @@ impl App {
     }
 
     fn set_selection_from_index(&mut self, index: Option<usize>) {
-        self.selection_id = index.and_then(|idx| self.scene.objects().get(idx).map(|object| object.id));
+        self.selection_id =
+            index.and_then(|idx| self.scene.objects().get(idx).map(|object| object.id));
     }
 
     fn render(&mut self) {
         let frame_start = Instant::now();
-        self.ui.update(&self.scene, &self.scene_runtime, &self.assets);
+        self.ui
+            .update(&self.scene, &self.scene_runtime, &self.assets);
         let ui_text = self.ui.summary().to_string();
         let object_names: Vec<CString> = self
             .scene
@@ -881,7 +1010,9 @@ impl App {
         let mut original_light_data: Option<DirectionalLightData> = None;
         let mut original_environment_data: Option<EnvironmentData> = None;
 
-        if let Some(selected) = Self::normalize_selection(selected_index, self.scene.objects().len()) {
+        if let Some(selected) =
+            Self::normalize_selection(selected_index, self.scene.objects().len())
+        {
             if let Some(object) = self.scene.objects().get(selected) {
                 can_edit_transform = matches!(object.kind, SceneObjectKind::Asset(_));
                 selected_kind = match &object.kind {
@@ -889,7 +1020,8 @@ impl App {
                         position = data.position;
                         rotation = data.rotation_deg;
                         scale = data.scale;
-                        original_asset_transform = Some((data.position, data.rotation_deg, data.scale));
+                        original_asset_transform =
+                            Some((data.position, data.rotation_deg, data.scale));
                         0
                     }
                     SceneObjectKind::DirectionalLight(data) => {
@@ -916,7 +1048,9 @@ impl App {
         let mut gizmo_origin_world_xyz = [f32::NAN; 3];
         let camera_world_xyz = self.camera.position;
         let mut gizmo_axis_world_len = 1.0f32;
-        if let Some(selected) = Self::normalize_selection(selected_index, self.scene.objects().len()) {
+        if let Some(selected) =
+            Self::normalize_selection(selected_index, self.scene.objects().len())
+        {
             if let Some(object) = self.scene.objects().get(selected) {
                 let world = match &object.kind {
                     SceneObjectKind::Asset(data) => data.position,
@@ -955,13 +1089,19 @@ impl App {
         );
         let material_names: Vec<CString> = scoped_material_indices
             .iter()
-            .filter_map(|index| self.assets.material_binding(*index).map(|binding| binding.material_name.as_str()))
+            .filter_map(|index| {
+                self.assets
+                    .material_binding(*index)
+                    .map(|binding| binding.material_name.as_str())
+            })
             .map(sanitize_cstring)
             .collect();
 
         let previous_material_global_index = self.ui.selected_material_index();
-        let mut selected_material_index =
-            global_material_index_to_ui_index(&scoped_material_indices, previous_material_global_index);
+        let mut selected_material_index = global_material_index_to_ui_index(
+            &scoped_material_indices,
+            previous_material_global_index,
+        );
         let mut material_params = self.ui.material_params();
         let previous_material_selection = previous_material_global_index;
         let previous_material_params = material_params;
@@ -992,8 +1132,7 @@ impl App {
             .iter()
             .map(|param| sanitize_cstring(param))
             .collect();
-        let mut material_binding_sources =
-            vec![0u8; MATERIAL_TEXTURE_PARAMS.len() * 260];
+        let mut material_binding_sources = vec![0u8; MATERIAL_TEXTURE_PARAMS.len() * 260];
         let mut material_binding_wrap_repeat_u = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
         let mut material_binding_wrap_repeat_v = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
         let mut material_binding_srgb = vec![true; MATERIAL_TEXTURE_PARAMS.len()];
@@ -1068,35 +1207,40 @@ impl App {
                     // gizmo handles are not occluded by scene mesh hits.
                     let include_scene_keys = !matches!(
                         self.transform_tool_mode,
-                        TransformToolMode::Translate | TransformToolMode::Rotate | TransformToolMode::Scale
+                        TransformToolMode::Translate
+                            | TransformToolMode::Rotate
+                            | TransformToolMode::Scale
                     ) || !has_active_selection;
-                    let pickable_entities: Vec<(crate::render::PickKey, Vec<crate::filament::Entity>)> =
-                        if include_scene_keys {
-                            self.scene
-                                .objects()
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(index, obj)| {
-                                    if let SceneObjectKind::Asset(_) = &obj.kind {
-                                        let loaded = self.assets.loaded_assets().iter().find(|a| {
-                                            self.scene_runtime.get(index)
-                                                .and_then(|rt| rt.root_entity)
-                                                .map_or(false, |re| re == a.root_entity)
-                                        });
-                                        loaded.map(|a| {
-                                            (
-                                                crate::render::PickKey::scene_mesh(index as u32),
-                                                a.renderable_entities.clone(),
-                                            )
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
+                    let pickable_entities: Vec<(
+                        crate::render::PickKey,
+                        Vec<crate::filament::Entity>,
+                    )> = if include_scene_keys {
+                        self.scene
+                            .objects()
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, obj)| {
+                                if let SceneObjectKind::Asset(_) = &obj.kind {
+                                    let loaded = self.assets.loaded_assets().iter().find(|a| {
+                                        self.scene_runtime
+                                            .get(index)
+                                            .and_then(|rt| rt.root_entity)
+                                            .map_or(false, |re| re == a.root_entity)
+                                    });
+                                    loaded.map(|a| {
+                                        (
+                                            crate::render::PickKey::scene_mesh(index as u32),
+                                            a.renderable_entities.clone(),
+                                        )
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     render.execute_pick_pass(&pickable_entities);
                 }
 
@@ -1212,13 +1356,19 @@ impl App {
         }
         // Do not acquire a gizmo after mouse-down. Engagement is decided strictly
         // at the press event's pick location to prevent drag-into-handle locking.
-        if self.mouse_buttons[0] && self.gizmo_active_axis != GIZMO_NONE && self.gizmo_drag_state.is_none() {
+        if self.mouse_buttons[0]
+            && self.gizmo_active_axis != GIZMO_NONE
+            && self.gizmo_drag_state.is_none()
+        {
             if let Some(mouse) = self.mouse_pos {
                 self.begin_gizmo_drag_if_needed(mouse);
             }
         }
         let previous_selection_id = self.selection_id;
-        self.set_selection_from_index(Self::normalize_selection(selected_index, self.scene.objects().len()));
+        self.set_selection_from_index(Self::normalize_selection(
+            selected_index,
+            self.scene.objects().len(),
+        ));
         selected_index = Self::selection_to_ui_index(self.current_selection_index());
         self.ui.set_selected_index(selected_index);
         self.ui.set_light_settings(light_settings);
@@ -1232,7 +1382,8 @@ impl App {
             for (row_index, row) in rows.iter_mut().enumerate() {
                 let start = row_index * 260;
                 let end = start + 260;
-                row.source.copy_from_slice(&material_binding_sources[start..end]);
+                row.source
+                    .copy_from_slice(&material_binding_sources[start..end]);
                 row.wrap_repeat_u = material_binding_wrap_repeat_u[row_index];
                 row.wrap_repeat_v = material_binding_wrap_repeat_v[row_index];
                 row.srgb = material_binding_srgb[row_index];
@@ -1284,7 +1435,8 @@ impl App {
             if self.selection_id == previous_selection_id {
                 if let Some(selected) = current_selection_index {
                     if can_edit_transform {
-                        if let Some((old_position, old_rotation, old_scale)) = original_asset_transform
+                        if let Some((old_position, old_rotation, old_scale)) =
+                            original_asset_transform
                         {
                             if old_position != position
                                 || old_rotation != rotation
@@ -1307,10 +1459,11 @@ impl App {
                             direction: light_settings.direction,
                         };
                         if old_light != &new_light {
-                            pending_update_light_command = Some(SceneCommand::UpdateDirectionalLight {
-                                index: selected,
-                                data: new_light,
-                            });
+                            pending_update_light_command =
+                                Some(SceneCommand::UpdateDirectionalLight {
+                                    index: selected,
+                                    data: new_light,
+                                });
                         }
                     }
 
@@ -1322,10 +1475,11 @@ impl App {
                             intensity: environment_intensity,
                         };
                         if old_environment != &new_environment {
-                            pending_update_environment_command = Some(SceneCommand::SetEnvironment {
-                                data: new_environment,
-                                apply_runtime: false,
-                            });
+                            pending_update_environment_command =
+                                Some(SceneCommand::SetEnvironment {
+                                    data: new_environment,
+                                    apply_runtime: false,
+                                });
                         }
                     }
                 }
@@ -1360,7 +1514,6 @@ impl App {
                     selected_material_global_index,
                 );
             }
-
         }
         if let Some(command) = pending_transform_command {
             let result = self.execute_scene_command(command);
@@ -1483,10 +1636,7 @@ impl App {
                         },
                         apply_runtime: true,
                     });
-                    self.apply_command_feedback(
-                        "Failed to apply environment",
-                        result,
-                    );
+                    self.apply_command_feedback("Failed to apply environment", result);
                 }
                 Err(message) => {
                     self.ui.set_environment_status(message);
@@ -1509,10 +1659,7 @@ impl App {
                 },
                 apply_runtime: false,
             });
-            self.apply_command_feedback(
-                "Failed to initialize environment object",
-                result,
-            );
+            self.apply_command_feedback("Failed to initialize environment object", result);
         }
         if save_scene {
             self.handle_save_scene_action();
@@ -1524,9 +1671,303 @@ impl App {
         self.timing
             .update(self.window.as_ref().map(|w| w.as_ref()), frame_start);
         self.update_camera();
+        self.run_harness_step();
     }
 
-    fn execute_scene_command(&mut self, command: SceneCommand) -> Result<CommandOutcome, CommandError> {
+    fn run_harness_step(&mut self) {
+        if self.harness.is_none() {
+            return;
+        }
+
+        let should_attempt_setup = self
+            .harness
+            .as_ref()
+            .map(|h| !h.setup_attempted)
+            .unwrap_or(false);
+        if should_attempt_setup {
+            let setup_result = self.run_harness_setup();
+            if let Some(harness) = &mut self.harness {
+                harness.setup_attempted = true;
+                match setup_result {
+                    Ok(()) => {
+                        harness.setup_success = true;
+                        harness.setup_error = None;
+                    }
+                    Err(err) => {
+                        harness.setup_success = false;
+                        harness.setup_error = Some(err);
+                    }
+                }
+            }
+        }
+
+        let should_attempt_import = self
+            .harness
+            .as_ref()
+            .map(|h| h.setup_success && !h.import_attempted)
+            .unwrap_or(false);
+        if should_attempt_import {
+            let import_path = self
+                .harness
+                .as_ref()
+                .map(|h| h.config.import_path.clone())
+                .unwrap_or_default();
+            let result = self.execute_scene_command(SceneCommand::AddAsset {
+                path: import_path.clone(),
+            });
+            let (success, error_message) = match result {
+                Ok(_) => (true, None),
+                Err(err) => (false, Some(err.to_string())),
+            };
+            if let Some(harness) = &mut self.harness {
+                harness.import_attempted = true;
+                harness.import_success = success;
+                harness.import_error = error_message;
+            }
+        }
+
+        if let Some(harness) = &mut self.harness {
+            harness.frame_count = harness.frame_count.saturating_add(1);
+        }
+
+        let should_capture = self
+            .harness
+            .as_ref()
+            .map(|h| {
+                h.import_success
+                    && h.config.screenshot_path.is_some()
+                    && !h.screenshot_attempted
+                    && h.frame_count >= h.config.settle_frames
+            })
+            .unwrap_or(false);
+        if should_capture {
+            let (screenshot_path, include_ui) = self
+                .harness
+                .as_ref()
+                .and_then(|h| {
+                    h.config
+                        .screenshot_path
+                        .clone()
+                        .map(|path| (path, h.config.include_ui))
+                })
+                .unwrap_or_else(|| (PathBuf::from(""), true));
+            let capture_result = if screenshot_path.as_os_str().is_empty() {
+                Err("screenshot path is empty".to_string())
+            } else if let Some(render) = &mut self.render {
+                render.capture_window_png(&screenshot_path, include_ui)
+            } else {
+                Err("render context unavailable for screenshot capture".to_string())
+            };
+
+            if let Some(harness) = &mut self.harness {
+                match capture_result {
+                    Ok(()) => {
+                        harness.screenshot_attempted = true;
+                        harness.screenshot_success = true;
+                        harness.screenshot_error = None;
+                    }
+                    Err(err) => {
+                        if err.contains("begin_frame returned false") {
+                            // Transient frame-availability issue: keep waiting and retry.
+                            harness.screenshot_error = Some(err);
+                        } else {
+                            harness.screenshot_attempted = true;
+                            harness.screenshot_success = false;
+                            harness.screenshot_error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        let timed_out = self
+            .harness
+            .as_ref()
+            .map(|h| h.frame_count >= h.config.max_frames)
+            .unwrap_or(false);
+        if timed_out {
+            if let Some(harness) = &mut self.harness {
+                if harness.setup_error.is_none() && !harness.setup_success {
+                    harness.setup_error = Some(format!(
+                        "harness setup timed out after {} frames",
+                        harness.config.max_frames
+                    ));
+                }
+                if harness.import_error.is_none() && !harness.import_success {
+                    harness.import_error = Some(format!(
+                        "harness timed out after {} frames",
+                        harness.config.max_frames
+                    ));
+                }
+                if harness.config.screenshot_path.is_some()
+                    && !harness.screenshot_attempted
+                    && harness.screenshot_error.is_none()
+                {
+                    harness.screenshot_error = Some(format!(
+                        "screenshot step timed out after {} frames",
+                        harness.config.max_frames
+                    ));
+                }
+            }
+        }
+
+        let should_finish = self
+            .harness
+            .as_ref()
+            .map(|h| {
+                if h.finished {
+                    return false;
+                }
+                if timed_out {
+                    return true;
+                }
+                if !h.setup_attempted {
+                    return false;
+                }
+                if !h.setup_success {
+                    return true;
+                }
+                if !h.import_attempted {
+                    return false;
+                }
+                if !h.import_success {
+                    return true;
+                }
+                if h.config.screenshot_path.is_some() {
+                    h.screenshot_attempted
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(false);
+
+        if should_finish {
+            self.finish_harness_run();
+        }
+    }
+
+    fn run_harness_setup(&mut self) -> Result<(), String> {
+        let config = self
+            .harness
+            .as_ref()
+            .map(|h| h.config.clone())
+            .ok_or_else(|| "harness configuration unavailable".to_string())?;
+
+        if config.add_default_light {
+            let result = self.execute_scene_command(SceneCommand::AddDirectionalLight {
+                name: "Harness Directional Light".to_string(),
+                data: DirectionalLightData {
+                    color: [1.0, 1.0, 1.0],
+                    intensity: 100_000.0,
+                    direction: [0.0, -1.0, -0.5],
+                },
+            });
+            if let Err(err) = result {
+                return Err(format!("failed adding harness directional light: {}", err));
+            }
+        }
+
+        let environment_data = build_harness_environment_data(&config)?;
+        if let Some(data) = environment_data {
+            let result = self.execute_scene_command(SceneCommand::SetEnvironment {
+                data,
+                apply_runtime: true,
+            });
+            if let Err(err) = result {
+                return Err(format!("failed applying harness environment: {}", err));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish_harness_run(&mut self) {
+        let (report_json, report_path, exit_code, status_message) = {
+            let Some(harness) = &mut self.harness else {
+                return;
+            };
+            if harness.finished {
+                return;
+            }
+            if harness.config.screenshot_path.is_some()
+                && !harness.screenshot_attempted
+                && harness.screenshot_error.is_none()
+            {
+                harness.screenshot_error = Some(
+                    "screenshot was not attempted due to an earlier harness failure".to_string(),
+                );
+            }
+            let screenshot_ok = if harness.config.screenshot_path.is_some() {
+                harness.screenshot_success
+            } else {
+                true
+            };
+            harness.exit_code = if harness.setup_success && harness.import_success && screenshot_ok
+            {
+                0
+            } else {
+                1
+            };
+            harness.finished = true;
+            let report = harness.report();
+            let report_json = serde_json::to_string_pretty(&report).unwrap_or_else(|_| {
+                "{\"error\":\"failed to serialize harness report\"}".to_string()
+            });
+            let status_message = if harness.exit_code == 0 {
+                "Harness completed successfully.".to_string()
+            } else {
+                "Harness completed with failures. See logs/report.".to_string()
+            };
+            (
+                report_json,
+                harness.config.report_path.clone(),
+                harness.exit_code,
+                status_message,
+            )
+        };
+
+        if let Some(path) = report_path {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(err) = std::fs::create_dir_all(parent) {
+                        log::warn!(
+                            "Harness: failed creating report directory '{}': {}",
+                            parent.display(),
+                            err
+                        );
+                    }
+                }
+            }
+            if let Err(err) = std::fs::write(&path, &report_json) {
+                log::warn!(
+                    "Harness: failed writing report '{}': {}",
+                    path.display(),
+                    err
+                );
+            } else {
+                log::info!("Harness report written to {}", path.display());
+            }
+        }
+
+        if exit_code == 0 {
+            log::info!("Harness report:\n{}", report_json);
+        } else {
+            log::warn!("Harness report:\n{}", report_json);
+        }
+        self.ui.set_environment_status(status_message);
+        self.close_requested = true;
+    }
+
+    fn harness_exit_code(&self) -> Option<i32> {
+        self.harness
+            .as_ref()
+            .and_then(|harness| harness.finished.then_some(harness.exit_code))
+    }
+
+    fn execute_scene_command(
+        &mut self,
+        command: SceneCommand,
+    ) -> Result<CommandOutcome, CommandError> {
         match command {
             SceneCommand::AddAsset { path } => self.command_add_asset(&path),
             SceneCommand::AddDirectionalLight { name, data } => {
@@ -1602,10 +2043,9 @@ impl App {
             .ok_or(CommandError::RenderEntityManagerUnavailable)?;
         let object_id = self.scene.reserve_object_id();
         log::info!("Loading glTF: {}", path);
-        let loaded = self
-            .assets
-            .load_gltf_from_path(engine, scene, &mut entity_manager, path, object_id)
-            ?;
+        let loaded =
+            self.assets
+                .load_gltf_from_path(engine, scene, &mut entity_manager, path, object_id)?;
         for entity in &loaded.renderable_entities {
             engine.renderable_set_layer_mask(*entity, 0xFF, 0x01);
         }
@@ -1923,7 +2363,10 @@ impl App {
         }
     }
 
-    fn command_save_scene(&mut self, path: &std::path::Path) -> Result<CommandOutcome, CommandError> {
+    fn command_save_scene(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<CommandOutcome, CommandError> {
         crate::scene::serialization::save_scene_to_file(&self.scene, path)?;
         Ok(CommandOutcome::Notice(CommandNotice {
             severity: CommandSeverity::Info,
@@ -1931,7 +2374,10 @@ impl App {
         }))
     }
 
-    fn command_load_scene(&mut self, path: &std::path::Path) -> Result<CommandOutcome, CommandError> {
+    fn command_load_scene(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<CommandOutcome, CommandError> {
         let loaded_scene = crate::scene::serialization::load_scene_from_file(path)?;
         self.scene = loaded_scene;
         match self.rebuild_runtime_scene() {
@@ -2039,16 +2485,13 @@ impl App {
                 match object.kind.clone() {
                     SceneObjectKind::Asset(data) => {
                         log::info!("Rehydrate asset '{}'", data.path);
-                        match self
-                            .assets
-                            .load_gltf_from_path(
-                                engine,
-                                scene,
-                                &mut entity_manager,
-                                &data.path,
-                                object.id,
-                            )
-                        {
+                        match self.assets.load_gltf_from_path(
+                            engine,
+                            scene,
+                            &mut entity_manager,
+                            &data.path,
+                            object.id,
+                        ) {
                             Ok(loaded) => {
                                 for entity in &loaded.renderable_entities {
                                     engine.renderable_set_layer_mask(*entity, 0xFF, 0x01);
@@ -2071,7 +2514,8 @@ impl App {
                                 });
                             }
                             Err(err) => {
-                                errors.push(format!("Asset '{}' failed to load: {}", data.path, err));
+                                errors
+                                    .push(format!("Asset '{}' failed to load: {}", data.path, err));
                                 runtime_objects.push(RuntimeObject::default());
                             }
                         }
@@ -2412,7 +2856,10 @@ mod tests {
                 uv_rotation_deg: 0.0,
             },
         });
-        assert!(matches!(result, Err(CommandError::TextureBindingSourceEmpty)));
+        assert!(matches!(
+            result,
+            Err(CommandError::TextureBindingSourceEmpty)
+        ));
     }
 
     #[test]
@@ -2473,7 +2920,10 @@ fn generate_ktx_from_hdr(hdr_path: &str) -> Result<(String, String), String> {
     }
     let hdr_hash = hash_file_bytes(&hdr)?;
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output_root = manifest_dir.join("assets").join("cache").join("environments");
+    let output_root = manifest_dir
+        .join("assets")
+        .join("cache")
+        .join("environments");
     let output_prefix = output_root.join(&hdr_hash);
     let output_dir = output_root.join(&hdr_hash);
     let ibl_path = output_dir.join(format!("{hdr_hash}_ibl.ktx"));
@@ -2623,7 +3073,8 @@ fn resolve_runtime_texture_cache(
         .map_err(|err| format!("Failed to create texture cache folder: {}", err))?;
     let ktx_path = cache_dir.join(format!("{source_hash}.ktx"));
     if !ktx_path.exists() {
-        let normalized_png_path = ensure_normalized_png_for_mipgen(&source, &cache_dir, &source_hash)?;
+        let normalized_png_path =
+            ensure_normalized_png_for_mipgen(&source, &cache_dir, &source_hash)?;
         let mipgen_path = PathBuf::from(env!("FILAMENT_BIN_DIR")).join("mipgen.exe");
         if !mipgen_path.exists() {
             return Err(format!("mipgen not found at {}", mipgen_path.display()));
@@ -2655,9 +3106,21 @@ fn ensure_normalized_png_for_mipgen(
         return Ok(normalized_png_path);
     }
     let image = image::ImageReader::open(source)
-        .map_err(|err| format!("Failed to open source image '{}': {}", source.display(), err))?
+        .map_err(|err| {
+            format!(
+                "Failed to open source image '{}': {}",
+                source.display(),
+                err
+            )
+        })?
         .decode()
-        .map_err(|err| format!("Failed to decode source image '{}': {}", source.display(), err))?;
+        .map_err(|err| {
+            format!(
+                "Failed to decode source image '{}': {}",
+                source.display(),
+                err
+            )
+        })?;
     image
         .to_rgba8()
         .save_with_format(&normalized_png_path, image::ImageFormat::Png)
@@ -2786,11 +3249,7 @@ fn normalize_angle_deg(mut a: f32) -> f32 {
 }
 
 #[allow(dead_code)]
-fn map_arcball_vector(
-    mouse: (f32, f32),
-    center_screen: [f32; 2],
-    radius_px: f32,
-) -> [f32; 3] {
+fn map_arcball_vector(mouse: (f32, f32), center_screen: [f32; 2], radius_px: f32) -> [f32; 3] {
     let r = radius_px.max(1.0);
     let x = (mouse.0 - center_screen[0]) / r;
     let y = (center_screen[1] - mouse.1) / r;
@@ -2872,9 +3331,7 @@ fn apply_scene_texture_bindings_to_runtime(
         let Some(runtime_path) = texture_binding_runtime_path(&entry.binding) else {
             errors.push(format!(
                 "Texture binding '{}' for object {} slot {} has no runtime .ktx path.",
-                entry.binding.texture_param,
-                entry.object_id,
-                entry.material_slot,
+                entry.binding.texture_param, entry.object_id, entry.material_slot,
             ));
             continue;
         };
@@ -2921,7 +3378,12 @@ fn texture_binding_runtime_path(binding: &MaterialTextureBindingData) -> Option<
     if let Some(path) = &binding.runtime_ktx_path {
         return Some(path.clone());
     }
-    if binding.source_path.trim().to_ascii_lowercase().ends_with(".ktx") {
+    if binding
+        .source_path
+        .trim()
+        .to_ascii_lowercase()
+        .ends_with(".ktx")
+    {
         return Some(binding.source_path.clone());
     }
     None
@@ -3133,8 +3595,7 @@ impl ApplicationHandler for App {
                     if self.mouse_buttons[0] && self.gizmo_active_axis != 0 {
                         self.begin_gizmo_drag_if_needed(new_pos);
                         self.apply_transform_tool_drag(new_pos);
-                    } else if let (Some((px, py)), Some(mode)) = (prev_pos, self.camera_drag_mode)
-                    {
+                    } else if let (Some((px, py)), Some(mode)) = (prev_pos, self.camera_drag_mode) {
                         let dx = new_pos.0 - px;
                         let dy = new_pos.1 - py;
                         match mode {
@@ -3190,7 +3651,9 @@ impl ApplicationHandler for App {
                                 }
                                 (MouseButton::Left, false) => {
                                     if self.pending_click_select && self.gizmo_active_axis == 0 {
-                                        if let (Some((mx, my)), Some(render)) = (self.mouse_pos, &mut self.render) {
+                                        if let (Some((mx, my)), Some(render)) =
+                                            (self.mouse_pos, &mut self.render)
+                                        {
                                             render.request_pick(mx, my);
                                         }
                                     }
@@ -3247,6 +3710,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.close_requested {
+            event_loop.exit();
+            return;
+        }
         let now = Instant::now();
         if now >= self.next_frame_time {
             if let Some(window) = &self.window {
@@ -3258,13 +3725,186 @@ impl ApplicationHandler for App {
     }
 }
 
+fn build_harness_environment_data(
+    config: &HarnessConfig,
+) -> Result<Option<EnvironmentData>, String> {
+    let (hdr_path, ibl_path, skybox_path) = if let Some(hdr) = &config.environment_hdr_path {
+        let (ibl, skybox) = generate_ktx_from_hdr(hdr)?;
+        (hdr.clone(), ibl, skybox)
+    } else {
+        match config.environment_preset {
+            HarnessEnvironmentPreset::None => return Ok(None),
+            HarnessEnvironmentPreset::AdamsPlace => (
+                "assets/environments/AdamsPlace/AdamsPlace.hdr".to_string(),
+                "assets/environments/AdamsPlace/AdamsPlace_ibl.ktx".to_string(),
+                "assets/environments/AdamsPlace/AdamsPlace_skybox.ktx".to_string(),
+            ),
+            HarnessEnvironmentPreset::ArtistWorkShop => (
+                "assets/environments/ArtistWorkShop/ArtistWorkShop.hdr".to_string(),
+                "assets/environments/ArtistWorkShop/ArtistWorkShop_ibl.ktx".to_string(),
+                "assets/environments/ArtistWorkShop/ArtistWorkShop_skybox.ktx".to_string(),
+            ),
+        }
+    };
+
+    // Validate paths early so harness failures are explicit.
+    resolve_path_for_read(&ibl_path)?;
+    resolve_path_for_read(&skybox_path)?;
+
+    Ok(Some(EnvironmentData {
+        hdr_path,
+        ibl_path,
+        skybox_path,
+        intensity: 30_000.0,
+    }))
+}
+
+fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
+    let mut import_path: Option<String> = None;
+    let mut screenshot_path: Option<PathBuf> = None;
+    let mut report_path: Option<PathBuf> = None;
+    let mut settle_frames: u32 = 30;
+    let mut max_frames: u32 = 360;
+    let mut include_ui = true;
+    let mut add_default_light = true;
+    let mut environment_preset = HarnessEnvironmentPreset::AdamsPlace;
+    let mut environment_hdr_path: Option<String> = None;
+    let mut saw_harness_flag = false;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--harness-import" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-import requires a path value".to_string());
+                };
+                import_path = Some(value);
+            }
+            "--harness-screenshot" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-screenshot requires a path value".to_string());
+                };
+                screenshot_path = Some(PathBuf::from(value));
+            }
+            "--harness-report" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-report requires a path value".to_string());
+                };
+                report_path = Some(PathBuf::from(value));
+            }
+            "--harness-settle-frames" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-settle-frames requires an integer value".to_string());
+                };
+                settle_frames = value.parse::<u32>().map_err(|_| {
+                    "--harness-settle-frames must be an unsigned integer".to_string()
+                })?;
+            }
+            "--harness-max-frames" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-max-frames requires an integer value".to_string());
+                };
+                max_frames = value
+                    .parse::<u32>()
+                    .map_err(|_| "--harness-max-frames must be an unsigned integer".to_string())?;
+            }
+            "--harness-no-ui" => {
+                saw_harness_flag = true;
+                include_ui = false;
+            }
+            "--harness-no-light" => {
+                saw_harness_flag = true;
+                add_default_light = false;
+            }
+            "--harness-env" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-env requires a value".to_string());
+                };
+                let normalized = value.to_ascii_lowercase();
+                environment_preset = match normalized.as_str() {
+                    "none" => HarnessEnvironmentPreset::None,
+                    "adamsplace" | "adams" => HarnessEnvironmentPreset::AdamsPlace,
+                    "artistworkshop" | "artist" => HarnessEnvironmentPreset::ArtistWorkShop,
+                    _ => {
+                        return Err(
+                            "--harness-env must be one of: none, adamsplace, artistworkshop"
+                                .to_string(),
+                        );
+                    }
+                };
+            }
+            "--harness-env-hdr" => {
+                saw_harness_flag = true;
+                let Some(value) = args.next() else {
+                    return Err("--harness-env-hdr requires a path value".to_string());
+                };
+                environment_hdr_path = Some(value);
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_harness_flag {
+        return Ok(None);
+    }
+    let Some(import_path) = import_path else {
+        return Err("Harness mode requires --harness-import <path-to-gltf-or-glb>".to_string());
+    };
+    if max_frames == 0 {
+        return Err("--harness-max-frames must be greater than zero".to_string());
+    }
+
+    Ok(Some(HarnessConfig {
+        import_path,
+        screenshot_path,
+        report_path,
+        settle_frames,
+        max_frames,
+        include_ui,
+        add_default_light,
+        environment_preset,
+        environment_hdr_path,
+    }))
+}
+
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
+    let harness_config = match parse_harness_config_from_args() {
+        Ok(config) => config,
+        Err(err) => {
+            log::error!("Invalid harness arguments: {}", err);
+            return;
+        }
+    };
+
     log::info!("🚀 Previz - Filament v1.69.0 Renderer POC");
     log::info!("   Press ESC or close window to exit");
+    if let Some(config) = &harness_config {
+        log::info!(
+            "Harness mode: import='{}' settle_frames={} max_frames={} screenshot={} ui={} light={} env={:?} env_hdr={}",
+            config.import_path,
+            config.settle_frames,
+            config.max_frames,
+            config
+                .screenshot_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<disabled>".to_string()),
+            if config.include_ui { "on" } else { "off" },
+            if config.add_default_light { "on" } else { "off" },
+            config.environment_preset,
+            config.environment_hdr_path.as_deref().unwrap_or("<none>"),
+        );
+    }
 
     let event_loop = match EventLoop::new() {
         Ok(loop_) => loop_,
@@ -3280,7 +3920,7 @@ pub fn run() {
     };
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new();
+    let mut app = App::new_with_harness(harness_config);
     if let Err(err) = event_loop.run_app(&mut app) {
         let message = format!("Event loop error: {err}");
         log::error!("{message}");
@@ -3291,6 +3931,9 @@ pub fn run() {
     }
 
     log::info!("👋 Goodbye!");
+    if let Some(code) = app.harness_exit_code() {
+        std::process::exit(code);
+    }
 }
 
 fn sanitize_cstring(value: &str) -> CString {
