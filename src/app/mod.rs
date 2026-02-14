@@ -1650,8 +1650,55 @@ impl App {
             .current_selection_index()
             .and_then(|index| self.scene_runtime.get(index))
             .and_then(|runtime| runtime.root_entity);
+        let selected_renderables: Vec<Entity> = self
+            .current_selection_index()
+            .and_then(|index| {
+                let object = self.scene.objects().get(index)?;
+                if !matches!(&object.kind, SceneObjectKind::Asset(_)) {
+                    return None;
+                }
+                let root_entity = self
+                    .scene_runtime
+                    .get(index)
+                    .and_then(|runtime| runtime.root_entity)?;
+                self.assets
+                    .loaded_assets()
+                    .iter()
+                    .find(|asset| asset.root_entity == root_entity)
+                    .map(|asset| asset.renderable_entities.clone())
+            })
+            .unwrap_or_default();
+        let selected_outline_params = self.current_selection_index().and_then(|index| {
+            let object = self.scene.objects().get(index)?;
+            if !matches!(&object.kind, SceneObjectKind::Asset(_)) {
+                return None;
+            }
+            let runtime = self.scene_runtime.get(index)?;
+            let max_extent = runtime.extent[0]
+                .max(runtime.extent[1])
+                .max(runtime.extent[2]);
+            let expand = (max_extent * 0.015).clamp(0.003, 0.05);
+            Some((runtime.center, expand))
+        });
         let current_selection_index = self.current_selection_index();
         if self.selection_id != previous_selection_id {
+            log::info!(
+                "Selection changed: object_index={:?}, outline_renderables={}",
+                current_selection_index,
+                selected_renderables.len()
+            );
+            if let Some(selected) = current_selection_index {
+                if matches!(
+                    self.scene.objects().get(selected).map(|o| &o.kind),
+                    Some(SceneObjectKind::Asset(_))
+                ) && selected_renderables.is_empty()
+                {
+                    log::warn!(
+                        "Selected asset has no renderable entities for outline pass (object_index={}).",
+                        selected
+                    );
+                }
+            }
             if let Some(selected) = current_selection_index {
                 if let Some(runtime) = self.scene_runtime.get(selected) {
                     if runtime.extent[0] > 0.0 || runtime.extent[1] > 0.0 || runtime.extent[2] > 0.0
@@ -1664,6 +1711,8 @@ impl App {
 
         if let Some(render) = &mut self.render {
             render.set_selected_entity(selected_runtime_entity);
+            render.set_selected_outline_params(selected_outline_params);
+            render.set_selected_renderables(&selected_renderables);
             if let Some(entity) = selected_light_entity {
                 let live_light = light_settings_to_light_data(light_settings, position, rotation);
                 render.set_light(entity, scene_light_to_filament_params(&live_light));

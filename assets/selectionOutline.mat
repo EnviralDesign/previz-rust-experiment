@@ -1,0 +1,30 @@
+material {
+    name : SelectionOutline,
+    shadingModel : unlit,
+    culling : front,
+    depthWrite : false,
+    depthCulling : true,
+    parameters : [
+        { type : float3, name : tint },
+        { type : float3, name : center },
+        { type : float, name : expand }
+    ],
+    featureLevel : 0
+}
+
+vertex {
+    void materialVertex(inout MaterialVertexInputs material) {
+        vec3 p = material.worldPosition.xyz;
+        vec3 delta = p - materialParams.center;
+        float len2 = dot(delta, delta);
+        vec3 dir = len2 > 1e-10 ? normalize(delta) : vec3(0.0, 0.0, 1.0);
+        material.worldPosition.xyz = p + dir * materialParams.expand;
+    }
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        material.baseColor = vec4(materialParams.tint, 1.0);
+    }
+}

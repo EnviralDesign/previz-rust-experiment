@@ -9,7 +9,8 @@ pub use light_helpers::LightHelperSpec;
 pub use pick::{PickHit, PickKey, PickKind, PickSystem};
 
 use crate::filament::{
-    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, LightParams, MaterialInstance,
+    Backend, Camera, Engine, Entity, ImGuiHelper, IndirectLight, LightParams, Material,
+    MaterialInstance,
     Renderer, Scene, Skybox, SwapChain, Texture, TextureInternalFormat, TextureUsage, View,
 };
 use std::ffi::c_void;
@@ -59,6 +60,12 @@ pub struct RenderContext {
     scene: Scene,
     camera: Camera,
     selected_entity: Option<Entity>,
+    selected_outline_params: Option<([f32; 3], f32)>,
+    selected_renderables: Vec<Entity>,
+    _selection_outline_material: Option<Material>,
+    selection_outline_instance: Option<MaterialInstance>,
+    selection_outline_last_applied_count: usize,
+    selection_outline_unavailable_warned: bool,
     indirect_light: Option<IndirectLight>,
     indirect_light_texture: Option<Texture>,
     skybox: Option<Skybox>,
@@ -78,6 +85,17 @@ pub struct RenderContext {
 const LAYER_SCENE: u8 = 0x01;
 const LAYER_OVERLAY: u8 = 0x02;
 const LAYER_PICK: u8 = 0x04;
+const LAYER_OUTLINE: u8 = 0x08;
+const OUTLINE_EXPAND_WORLD_DEFAULT: f32 = 0.02;
+
+struct SavedSelectionOutlineMaterials {
+    entity: Entity,
+    entries: Vec<(i32, *mut c_void)>,
+}
+
+struct SelectionOutlineRestore {
+    saved: Vec<SavedSelectionOutlineMaterials>,
+}
 
 impl RenderContext {
     pub fn new(window: &Window) -> Result<Self, RenderError> {
@@ -151,6 +169,22 @@ impl RenderContext {
             &mut entity_manager,
             LAYER_OVERLAY,
         );
+        let mut selection_outline_material =
+            engine.create_material(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/selectionOutline.filamat"
+            )));
+        let mut selection_outline_instance = selection_outline_material
+            .as_mut()
+            .and_then(|mat| mat.create_instance());
+        if let Some(instance) = &mut selection_outline_instance {
+            instance.set_float3("tint", [1.0, 0.68, 0.24]);
+            instance.set_float3("center", [0.0, 0.0, 0.0]);
+            instance.set_float("expand", OUTLINE_EXPAND_WORLD_DEFAULT);
+            log::info!("Selection outline material initialized.");
+        } else {
+            log::warn!("Selection outline material unavailable; GLTF selection outline disabled.");
+        }
 
         Ok(Self {
             engine,
@@ -164,6 +198,12 @@ impl RenderContext {
             scene,
             camera,
             selected_entity: None,
+            selected_outline_params: None,
+            selected_renderables: Vec::new(),
+            _selection_outline_material: selection_outline_material,
+            selection_outline_instance,
+            selection_outline_last_applied_count: 0,
+            selection_outline_unavailable_warned: false,
             indirect_light: None,
             indirect_light_texture: None,
             skybox: None,
@@ -458,6 +498,7 @@ impl RenderContext {
                 }
             }
             self.renderer.render(&self.view);
+            self.render_selection_outline_pass();
             if let Some(overlay_view) = &self.overlay_view {
                 self.renderer.render(overlay_view);
             }
@@ -490,8 +531,32 @@ impl RenderContext {
     }
 
     pub fn set_selected_entity(&mut self, entity: Option<Entity>) {
-        // Placeholder hook for upcoming viewport highlighting/picking.
         self.selected_entity = entity;
+    }
+
+    pub fn set_selected_outline_params(&mut self, params: Option<([f32; 3], f32)>) {
+        self.selected_outline_params = params;
+    }
+
+    pub fn set_selected_renderables(&mut self, entities: &[Entity]) {
+        let previous_count = self.selected_renderables.len();
+        self.selected_renderables.clear();
+        for &entity in entities {
+            if self
+                .selected_renderables
+                .iter()
+                .any(|existing| existing.id == entity.id)
+            {
+                continue;
+            }
+            self.selected_renderables.push(entity);
+        }
+        if self.selected_renderables.len() != previous_count {
+            log::info!(
+                "Outline target renderables updated: {}",
+                self.selected_renderables.len()
+            );
+        }
     }
 
     pub fn set_entity_transform(&mut self, entity: Entity, matrix4x4: [f32; 16]) -> bool {
@@ -589,6 +654,9 @@ impl RenderContext {
             pick_view.set_scene(&mut self.scene);
         }
         self.pending_pick_entities = None;
+        self.selected_entity = None;
+        self.selected_outline_params = None;
+        self.selected_renderables.clear();
         if let Some(ps) = &mut self.pick_system {
             ps.reset_scene_state();
         }
@@ -736,6 +804,7 @@ impl RenderContext {
         }
 
         self.renderer.render(&self.view);
+        self.render_selection_outline_pass();
         if let Some(overlay_view) = &self.overlay_view {
             self.renderer.render(overlay_view);
         }
@@ -804,6 +873,105 @@ impl RenderContext {
             image::ImageFormat::Png,
         )
         .map_err(|err| format!("failed writing screenshot '{}': {}", path.display(), err))
+    }
+
+    fn begin_selection_outline_pass(&mut self) -> Option<SelectionOutlineRestore> {
+        if self.selection_outline_instance.is_none() {
+            if !self.selected_renderables.is_empty() && !self.selection_outline_unavailable_warned {
+                log::warn!(
+                    "Outline requested for {} renderables, but outline material instance is unavailable.",
+                    self.selected_renderables.len()
+                );
+                self.selection_outline_unavailable_warned = true;
+            }
+            return None;
+        }
+        self.selection_outline_unavailable_warned = false;
+        if self.selected_renderables.is_empty() {
+            if self.selection_outline_last_applied_count != 0 {
+                self.selection_outline_last_applied_count = 0;
+            }
+            return None;
+        }
+
+        if let Some(outline) = self.selection_outline_instance.as_mut() {
+            let (center, expand) = self
+                .selected_outline_params
+                .unwrap_or(([0.0, 0.0, 0.0], OUTLINE_EXPAND_WORLD_DEFAULT));
+            outline.set_float3("center", center);
+            outline.set_float("expand", expand.max(0.0001));
+        }
+        let Some(outline) = self.selection_outline_instance.as_ref() else {
+            return None;
+        };
+
+        let mut saved = Vec::new();
+        for &entity in &self.selected_renderables {
+            let primitive_count = self.engine.renderable_primitive_count(entity);
+            if primitive_count <= 0 {
+                continue;
+            }
+            let mut entries = Vec::with_capacity(primitive_count as usize);
+            for primitive_index in 0..primitive_count {
+                let original = self
+                    .engine
+                    .renderable_get_material_raw(entity, primitive_index);
+                entries.push((primitive_index, original));
+                self.engine
+                    .renderable_set_material(entity, primitive_index, outline);
+            }
+            self.engine
+                .renderable_set_layer_mask(entity, 0xFF, LAYER_OUTLINE);
+            saved.push(SavedSelectionOutlineMaterials { entity, entries });
+        }
+
+        if saved.is_empty() {
+            log::warn!(
+                "Outline pass found selected renderables but no renderable primitives were available."
+            );
+            return None;
+        }
+        if self.selection_outline_last_applied_count != saved.len() {
+            self.selection_outline_last_applied_count = saved.len();
+            log::info!(
+                "Outline pass applied to {} renderable entities.",
+                self.selection_outline_last_applied_count
+            );
+        }
+        Some(SelectionOutlineRestore { saved })
+    }
+
+    fn end_selection_outline_pass(&mut self, state: Option<SelectionOutlineRestore>) {
+        let Some(state) = state else {
+            return;
+        };
+        for saved_entity in state.saved {
+            for (primitive_index, material_ptr) in saved_entity.entries {
+                self.engine.renderable_restore_material_raw(
+                    saved_entity.entity,
+                    primitive_index,
+                    material_ptr,
+                );
+            }
+            self.engine
+                .renderable_set_layer_mask(saved_entity.entity, 0xFF, LAYER_SCENE);
+        }
+    }
+
+    fn render_selection_outline_pass(&mut self) {
+        let state = self.begin_selection_outline_pass();
+        if state.is_none() {
+            return;
+        }
+        // Keep beauty pass depth/color so the outline shell can test against it.
+        self.renderer
+            .set_clear_options(0.1, 0.1, 0.2, 1.0, false, false);
+        self.view.set_visible_layers(0xFF, LAYER_OUTLINE);
+        self.renderer.render(&self.view);
+        self.view.set_visible_layers(0xFF, LAYER_SCENE);
+        self.renderer
+            .set_clear_options(0.1, 0.1, 0.2, 1.0, true, true);
+        self.end_selection_outline_pass(state);
     }
 }
 
