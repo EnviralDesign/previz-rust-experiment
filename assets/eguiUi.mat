@@ -1,0 +1,27 @@
+material {
+    name : EguiUi,
+    requires : [
+        color,
+        uv0
+    ],
+    shadingModel : unlit,
+    blending : transparent,
+    depthWrite : false,
+    depthCulling : false,
+    culling : none,
+    featureLevel : 0,
+    parameters : [
+        { type : sampler2d, name : albedo }
+    ]
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec2 uv = getUV0();
+        uv.y = 1.0 - uv.y;
+        vec4 albedo = texture2D(materialParams_albedo, uv);
+        material.baseColor = getColor() * albedo;
+        material.baseColor.rgb *= material.baseColor.a;
+    }
+}

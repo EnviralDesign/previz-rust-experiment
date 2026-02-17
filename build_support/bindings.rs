@@ -43,6 +43,7 @@ extern "C" {
     
     pub fn filament_engine_create(backend: u8) -> *mut Engine;
     pub fn filament_engine_destroy(engine: *mut *mut Engine);
+    pub fn filament_engine_destroy_entity(engine: *mut Engine, entity: i32);
     
     pub fn filament_engine_create_swap_chain(
         engine: *mut Engine,
@@ -194,6 +195,10 @@ extern "C" {
         material: *mut Material,
     ) -> *mut MaterialInstance;
     pub fn filament_material_create_instance(material: *mut Material) -> *mut MaterialInstance;
+    pub fn filament_engine_destroy_material_instance(
+        engine: *mut Engine,
+        instance: *mut MaterialInstance,
+    );
     pub fn filament_material_instance_get_name(instance: *mut MaterialInstance) -> *const c_char;
     pub fn filament_material_instance_has_parameter(
         instance: *mut MaterialInstance,
@@ -242,6 +247,14 @@ extern "C" {
         wrap_repeat_u: bool,
         wrap_repeat_v: bool,
         out_texture: *mut *mut Texture,
+    ) -> bool;
+    pub fn filament_material_instance_set_texture(
+        instance: *mut MaterialInstance,
+        name: *const c_char,
+        texture: *mut Texture,
+        linear_filtering: bool,
+        wrap_repeat_u: bool,
+        wrap_repeat_v: bool,
     ) -> bool;
     
     // ========================================================================
@@ -632,6 +645,14 @@ extern "C" {
         internal_format: u8,
         usage_flags: u32,
     ) -> *mut Texture;
+    pub fn filament_texture_set_image_rgba8(
+        engine: *mut Engine,
+        texture: *mut Texture,
+        width: u32,
+        height: u32,
+        pixels: *const u8,
+        pixel_count_rgba8: u32,
+    ) -> bool;
 
     pub fn filament_render_target_create(
         engine: *mut Engine,

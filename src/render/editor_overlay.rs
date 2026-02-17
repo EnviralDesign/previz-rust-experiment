@@ -175,6 +175,13 @@ impl EditorOverlay {
         }
     }
 
+    pub fn destroy_entities(&mut self, engine: &mut Engine, scene: &mut Scene) {
+        for handle in self.handles.drain(..) {
+            scene.remove_entity(handle.entity);
+            engine.destroy_entity(handle.entity);
+        }
+    }
+
     pub fn pickable_entities(&self) -> Vec<(PickKey, Vec<Entity>)> {
         let Some(object_id) = self.params.selected_object_index else {
             return Vec::new();

@@ -17,6 +17,10 @@ winit = "0.30"
 # For platform-specific window handles
 raw-window-handle = "0.6"
 
+# Rust-native immediate GUI (new backend)
+egui = "0.31"
+egui-winit = "0.31"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"

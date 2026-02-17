@@ -93,6 +93,13 @@ impl LightHelperSystem {
         }
     }
 
+    pub fn clear(&mut self, engine: &mut Engine, scene: &mut Scene) {
+        for (_, entry) in self.helpers.drain() {
+            scene.remove_entity(entry.entity);
+            engine.destroy_entity(entry.entity);
+        }
+    }
+
     pub fn pickables(&self, specs: &[LightHelperSpec]) -> Vec<(PickKey, Vec<Entity>)> {
         let mut out = Vec::new();
         for spec in specs {

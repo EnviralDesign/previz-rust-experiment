@@ -256,6 +256,13 @@ impl Engine {
         }
     }
 
+    /// Destroy all engine-side components attached to an entity.
+    pub fn destroy_entity(&mut self, entity: Entity) {
+        unsafe {
+            ffi::filament_engine_destroy_entity(self.ptr.as_ptr() as *mut _, entity.id);
+        }
+    }
+
     /// Update light parameters for an existing light entity.
     pub fn set_light(&mut self, entity: Entity, params: LightParams) {
         unsafe {
@@ -395,6 +402,25 @@ impl Engine {
         }
     }
 
+    pub fn set_texture_image_rgba8(
+        &mut self,
+        texture: &mut Texture,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> bool {
+        unsafe {
+            ffi::filament_texture_set_image_rgba8(
+                self.ptr.as_ptr() as *mut _,
+                texture.ptr.as_ptr() as *mut _,
+                width,
+                height,
+                pixels.as_ptr(),
+                pixels.len() as u32,
+            )
+        }
+    }
+
     /// Create a material from package bytes
     pub fn create_material(&mut self, package: &[u8]) -> Option<Material> {
         unsafe {
@@ -407,7 +433,10 @@ impl Engine {
             let material =
                 ffi::filament_material_builder_build(builder, self.ptr.as_ptr() as *mut _);
             ffi::filament_material_builder_destroy(builder);
-            NonNull::new(material as *mut c_void).map(|ptr| Material { ptr })
+            NonNull::new(material as *mut c_void).map(|ptr| Material {
+                ptr,
+                engine: self.ptr,
+            })
         }
     }
 
@@ -861,6 +890,7 @@ impl TransformManager {
 /// Material
 pub struct Material {
     ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
 }
 
 impl Material {
@@ -870,6 +900,7 @@ impl Material {
             let ptr = ffi::filament_material_get_default_instance(self.ptr.as_ptr() as *mut _);
             NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance {
                 ptr,
+                engine: self.engine,
                 owned: false, // Default instance is not owned
             })
         }
@@ -879,7 +910,11 @@ impl Material {
     pub fn create_instance(&mut self) -> Option<MaterialInstance> {
         unsafe {
             let ptr = ffi::filament_material_create_instance(self.ptr.as_ptr() as *mut _);
-            NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance { ptr, owned: true })
+            NonNull::new(ptr as *mut c_void).map(|ptr| MaterialInstance {
+                ptr,
+                engine: self.engine,
+                owned: true,
+            })
         }
     }
 }
@@ -887,6 +922,7 @@ impl Material {
 /// Material instance
 pub struct MaterialInstance {
     ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
     owned: bool,
 }
 
@@ -1046,10 +1082,48 @@ impl MaterialInstance {
             None
         }
     }
+
+    pub fn set_texture(
+        &mut self,
+        name: &str,
+        texture: &Texture,
+        linear_filtering: bool,
+        wrap_repeat_u: bool,
+        wrap_repeat_v: bool,
+    ) -> bool {
+        let c_name = match CString::new(name) {
+            Ok(name) => name,
+            Err(_) => {
+                log::warn!("Invalid texture parameter name (contains NUL byte).");
+                return false;
+            }
+        };
+        unsafe {
+            ffi::filament_material_instance_set_texture(
+                self.ptr.as_ptr() as *mut _,
+                c_name.as_ptr(),
+                texture.ptr.as_ptr() as *mut _,
+                linear_filtering,
+                wrap_repeat_u,
+                wrap_repeat_v,
+            )
+        }
+    }
 }
 
-// Note: MaterialInstance drop is complex because default instances aren't owned
-// For now we'll leak owned instances (proper cleanup requires engine reference)
+impl Drop for MaterialInstance {
+    fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
+        unsafe {
+            ffi::filament_engine_destroy_material_instance(
+                self.engine.as_ptr() as *mut _,
+                self.ptr.as_ptr() as *mut _,
+            );
+        }
+    }
+}
 
 /// gltfio material provider (jit shader provider)
 pub struct GltfMaterialProvider {
@@ -1103,6 +1177,7 @@ impl Drop for GltfTextureProvider {
 /// gltfio asset loader
 pub struct GltfAssetLoader {
     ptr: NonNull<c_void>,
+    engine: NonNull<c_void>,
 }
 
 impl GltfAssetLoader {
@@ -1117,7 +1192,10 @@ impl GltfAssetLoader {
                 material_provider.ptr.as_ptr() as *mut _,
                 entity_manager.ptr.as_ptr() as *mut _,
             );
-            NonNull::new(ptr as *mut c_void).map(|ptr| GltfAssetLoader { ptr })
+            NonNull::new(ptr as *mut c_void).map(|ptr| GltfAssetLoader {
+                ptr,
+                engine: engine.ptr,
+            })
         }
     }
 
@@ -1131,6 +1209,7 @@ impl GltfAssetLoader {
             NonNull::new(ptr as *mut c_void).map(|ptr| GltfAsset {
                 ptr,
                 loader: self.ptr,
+                engine: self.engine,
             })
         }
     }
@@ -1218,6 +1297,7 @@ impl Drop for GltfResourceLoader {
 pub struct GltfAsset {
     ptr: NonNull<c_void>,
     loader: NonNull<c_void>,
+    engine: NonNull<c_void>,
 }
 
 impl GltfAsset {
@@ -1277,6 +1357,7 @@ impl GltfAsset {
             if let Some(mi) = NonNull::new(mi_ptr as *mut c_void) {
                 let material = MaterialInstance {
                     ptr: mi,
+                    engine: self.engine,
                     owned: false,
                 };
                 names.push(material.name());
@@ -1869,6 +1950,7 @@ pub enum TextureInternalFormat {
 pub enum TextureUsage {
     ColorAttachment = 0x0001,
     DepthAttachment = 0x0002,
+    Uploadable = 0x0008,
     Sampleable = 0x0010,
     BlitSrc = 0x0040,
 }

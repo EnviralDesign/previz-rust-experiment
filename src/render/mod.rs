@@ -1,4 +1,5 @@
 mod camera;
+mod egui_overlay;
 mod editor_overlay;
 mod light_helpers;
 pub mod pick;
@@ -46,16 +47,20 @@ pub enum RenderError {
     UiViewCreateFailed,
     #[error("failed to create ImGui helper")]
     UiHelperCreateFailed,
+    #[error("failed to create egui overlay renderer")]
+    EguiOverlayCreateFailed,
 }
 
 pub struct RenderContext {
     engine: Engine,
     swap_chain: SwapChain,
     renderer: Renderer,
+    clear_view: Option<View>,
     view: View,
     overlay_view: Option<View>,
     ui_view: Option<View>,
     ui_helper: Option<ImGuiHelper>,
+    egui_overlay: Option<egui_overlay::EguiOverlay>,
     ui_enabled: bool,
     scene: Scene,
     camera: Camera,
@@ -109,7 +114,7 @@ impl RenderContext {
         let mut renderer = engine
             .create_renderer()
             .ok_or(RenderError::RendererCreateFailed)?;
-        renderer.set_clear_options(0.1, 0.1, 0.2, 1.0, true, true);
+        renderer.set_clear_options(0.1, 0.1, 0.2, 1.0, true, false);
 
         let mut scene = engine
             .create_scene()
@@ -128,6 +133,17 @@ impl RenderContext {
         view.set_scene(&mut scene);
         view.set_camera(&mut camera);
         view.set_visible_layers(0xFF, LAYER_SCENE);
+
+        // Full-window clear pass. This ensures UI-only regions are refreshed each frame
+        // even when the main 3D view renders into a smaller viewport pane.
+        let mut clear_view = engine.create_view();
+        if let Some(cv) = &mut clear_view {
+            cv.set_scene(&mut scene);
+            cv.set_camera(&mut camera);
+            cv.set_viewport(0, 0, window_size.width, window_size.height);
+            cv.set_post_processing_enabled(false);
+            cv.set_visible_layers(0xFF, 0x00);
+        }
 
         let mut overlay_view = engine.create_view();
         if let Some(ov) = &mut overlay_view {
@@ -190,10 +206,12 @@ impl RenderContext {
             engine,
             swap_chain,
             renderer,
+            clear_view,
             view,
             overlay_view,
             ui_view: None,
             ui_helper: None,
+            egui_overlay: None,
             ui_enabled: true,
             scene,
             camera,
@@ -238,11 +256,17 @@ impl RenderContext {
         let aspect = width as f64 / height as f64;
         self.camera
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
+        if let Some(clear_view) = &mut self.clear_view {
+            clear_view.set_viewport(0, 0, width, height);
+        }
         if let Some(overlay_view) = &mut self.overlay_view {
             overlay_view.set_viewport(0, 0, width, height);
         }
         if let Some(ui_view) = &mut self.ui_view {
             ui_view.set_viewport(0, 0, width, height);
+        }
+        if let Some(egui_overlay) = &mut self.egui_overlay {
+            egui_overlay.resize(width, height);
         }
         // Resize pick system
         if let Some(ps) = &mut self.pick_system {
@@ -272,6 +296,50 @@ impl RenderContext {
             .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
     }
 
+    pub fn set_scene_viewport_top_left(
+        &mut self,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+    ) {
+        let window_width = self.viewport_width.max(1);
+        let window_height = self.viewport_height.max(1);
+        let clamped_left = left.min(window_width.saturating_sub(1));
+        let clamped_top = top.min(window_height.saturating_sub(1));
+        let clamped_width = width.max(1).min(window_width.saturating_sub(clamped_left));
+        let clamped_height = height
+            .max(1)
+            .min(window_height.saturating_sub(clamped_top));
+        let bottom = window_height.saturating_sub(clamped_top + clamped_height);
+
+        self.view.set_viewport(
+            clamped_left as i32,
+            bottom as i32,
+            clamped_width,
+            clamped_height,
+        );
+        if let Some(overlay_view) = &mut self.overlay_view {
+            overlay_view.set_viewport(
+                clamped_left as i32,
+                bottom as i32,
+                clamped_width,
+                clamped_height,
+            );
+        }
+        if let Some(pick_view) = &mut self.pick_view {
+            pick_view.set_viewport(
+                clamped_left as i32,
+                bottom as i32,
+                clamped_width,
+                clamped_height,
+            );
+        }
+        let aspect = clamped_width as f64 / clamped_height as f64;
+        self.camera
+            .set_projection_perspective(45.0, aspect, 0.1, 1000.0);
+    }
+
     pub fn init_ui(&mut self, window: &Window) -> Result<(), RenderError> {
         let mut ui_view = self
             .engine
@@ -287,6 +355,34 @@ impl RenderContext {
         self.ui_view = Some(ui_view);
         self.ui_helper = Some(helper);
         Ok(())
+    }
+
+    pub fn init_egui_overlay(&mut self, window: &Window) -> Result<(), RenderError> {
+        let size = window.inner_size();
+        let overlay =
+            egui_overlay::EguiOverlay::new(&mut self.engine, size.width.max(1), size.height.max(1))
+                .ok_or(RenderError::EguiOverlayCreateFailed)?;
+        self.egui_overlay = Some(overlay);
+        Ok(())
+    }
+
+    pub fn update_egui_overlay(
+        &mut self,
+        clipped_primitives: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        pixels_per_point: f32,
+        screen_size_px: [u32; 2],
+    ) -> Result<(), String> {
+        let Some(overlay) = self.egui_overlay.as_mut() else {
+            return Ok(());
+        };
+        overlay.update(
+            &mut self.engine,
+            clipped_primitives,
+            textures_delta,
+            pixels_per_point,
+            screen_size_px,
+        )
     }
 
     pub fn set_ui_enabled(&mut self, enabled: bool) {
@@ -485,6 +581,9 @@ impl RenderContext {
         }
         }
         if self.renderer.begin_frame(&mut self.swap_chain) {
+            if let Some(clear_view) = &self.clear_view {
+                self.renderer.render(clear_view);
+            }
             // GPU pick pass — render to offscreen RT before beauty pass
             if let Some(pickable) = self.pending_pick_entities.take() {
                 if let (Some(ps), Some(pv)) = (&mut self.pick_system, &self.pick_view) {
@@ -507,6 +606,60 @@ impl RenderContext {
                     self.renderer.render(ui_view);
                 }
             }
+            if let Some(egui_overlay) = &self.egui_overlay {
+                egui_overlay.render(&mut self.renderer);
+            }
+            self.renderer.end_frame();
+        }
+        // Pick readback — after endFrame, before next beginFrame
+        if let Some(ps) = &mut self.pick_system {
+            if ps.has_pending_pick() {
+                if ps.schedule_readback(&mut self.renderer) {
+                    self.engine.flush_and_wait();
+                    ps.complete_readback();
+                }
+            }
+        }
+
+        let render_end = std::time::Instant::now();
+        render_end
+            .saturating_duration_since(frame_start)
+            .as_secs_f32()
+            * 1000.0
+    }
+
+    pub fn render_frame_with_overlay<F: FnOnce()>(&mut self, overlay_pass: F) -> f32 {
+        let frame_start = std::time::Instant::now();
+        if self.renderer.begin_frame(&mut self.swap_chain) {
+            if let Some(clear_view) = &self.clear_view {
+                self.renderer.render(clear_view);
+            }
+            // GPU pick pass — render to offscreen RT before beauty pass
+            if let Some(pickable) = self.pending_pick_entities.take() {
+                if let (Some(ps), Some(pv)) = (&mut self.pick_system, &self.pick_view) {
+                    if let Some(overlay) = &mut self.editor_overlay {
+                        overlay.set_pick_width_mode(true);
+                    }
+                    ps.render_pick_pass(&mut self.engine, &mut self.renderer, pv, &pickable);
+                    if let Some(overlay) = &mut self.editor_overlay {
+                        overlay.set_pick_width_mode(false);
+                    }
+                }
+            }
+            self.renderer.render(&self.view);
+            self.render_selection_outline_pass();
+            if let Some(overlay_view) = &self.overlay_view {
+                self.renderer.render(overlay_view);
+            }
+            if self.ui_enabled {
+                if let Some(ui_view) = &self.ui_view {
+                    self.renderer.render(ui_view);
+                }
+            }
+            if let Some(egui_overlay) = &self.egui_overlay {
+                egui_overlay.render(&mut self.renderer);
+            }
+            overlay_pass();
             self.renderer.end_frame();
         }
         // Pick readback — after endFrame, before next beginFrame
@@ -635,6 +788,11 @@ impl RenderContext {
     }
 
     pub fn clear_scene(&mut self) {
+        if let Some(light_helpers) = &mut self.light_helpers {
+            light_helpers.clear(&mut self.engine, &mut self.scene);
+        }
+        self.light_helper_specs.clear();
+
         // Remove all entities from the Filament scene except camera
         // Note: In a full implementation, we'd track all entities and remove them properly
         // For now, we create a fresh scene
@@ -662,17 +820,6 @@ impl RenderContext {
         }
         if let Some(overlay) = &self.editor_overlay {
             overlay.attach_to_scene(&mut self.scene);
-        }
-        self.light_helper_specs.clear();
-        if let Some(mut entity_manager) = self.engine.entity_manager() {
-            self.light_helpers = light_helpers::LightHelperSystem::new(
-                &mut self.engine,
-                &mut self.scene,
-                &mut entity_manager,
-                LAYER_OVERLAY,
-            );
-        } else {
-            self.light_helpers = None;
         }
 
         // Reset environment
@@ -794,6 +941,9 @@ impl RenderContext {
         };
 
         self.view.set_render_target(Some(&render_target));
+        if let Some(clear_view) = &mut self.clear_view {
+            clear_view.set_render_target(Some(&render_target));
+        }
         if let Some(overlay_view) = &mut self.overlay_view {
             overlay_view.set_render_target(Some(&render_target));
         }
@@ -801,8 +951,14 @@ impl RenderContext {
             if let Some(ui_view) = &mut self.ui_view {
                 ui_view.set_render_target(Some(&render_target));
             }
+            if let Some(egui_overlay) = &mut self.egui_overlay {
+                egui_overlay.set_render_target(Some(&render_target));
+            }
         }
 
+        if let Some(clear_view) = &self.clear_view {
+            self.renderer.render(clear_view);
+        }
         self.renderer.render(&self.view);
         self.render_selection_outline_pass();
         if let Some(overlay_view) = &self.overlay_view {
@@ -812,15 +968,24 @@ impl RenderContext {
             if let Some(ui_view) = &self.ui_view {
                 self.renderer.render(ui_view);
             }
+            if let Some(egui_overlay) = &self.egui_overlay {
+                egui_overlay.render(&mut self.renderer);
+            }
         }
 
         self.view.set_render_target(None);
+        if let Some(clear_view) = &mut self.clear_view {
+            clear_view.set_render_target(None);
+        }
         if let Some(overlay_view) = &mut self.overlay_view {
             overlay_view.set_render_target(None);
         }
         if include_ui {
             if let Some(ui_view) = &mut self.ui_view {
                 ui_view.set_render_target(None);
+            }
+            if let Some(egui_overlay) = &mut self.egui_overlay {
+                egui_overlay.set_render_target(None);
             }
         }
         self.renderer.end_frame();
@@ -970,8 +1135,22 @@ impl RenderContext {
         self.renderer.render(&self.view);
         self.view.set_visible_layers(0xFF, LAYER_SCENE);
         self.renderer
-            .set_clear_options(0.1, 0.1, 0.2, 1.0, true, true);
+            .set_clear_options(0.1, 0.1, 0.2, 1.0, true, false);
         self.end_selection_outline_pass(state);
+    }
+}
+
+impl Drop for RenderContext {
+    fn drop(&mut self) {
+        self.engine.flush_and_wait();
+        if let Some(light_helpers) = &mut self.light_helpers {
+            light_helpers.clear(&mut self.engine, &mut self.scene);
+        }
+        self.light_helper_specs.clear();
+        if let Some(overlay) = &mut self.editor_overlay {
+            overlay.destroy_entities(&mut self.engine, &mut self.scene);
+        }
+        self.engine.flush_and_wait();
     }
 }
 

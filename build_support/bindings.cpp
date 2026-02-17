@@ -85,6 +85,11 @@ void filament_engine_destroy(Engine** engine) {
     Engine::destroy(engine);
 }
 
+void filament_engine_destroy_entity(Engine* engine, int32_t entity_id) {
+    if (!engine) return;
+    engine->destroy(utils::Entity::import(entity_id));
+}
+
 SwapChain* filament_engine_create_swap_chain(Engine* engine, void* native_window, uint64_t flags) {
     return engine->createSwapChain(native_window, flags);
 }
@@ -171,15 +176,11 @@ void filament_renderer_render(Renderer* renderer, View* view) {
 }
 
 void filament_renderer_set_clear_options(Renderer* renderer, float r, float g, float b, float a, bool clear, bool discard) {
-    printf("[C++] filament_renderer_set_clear_options: renderer=%p\n", renderer);
-    fflush(stdout);
     Renderer::ClearOptions options;
     options.clearColor = {r, g, b, a};
     options.clear = clear;
     options.discard = discard;
     renderer->setClearOptions(options);
-    printf("[C++] filament_renderer_set_clear_options: done\n");
-    fflush(stdout);
 }
 
 // ============================================================================
@@ -381,6 +382,16 @@ MaterialInstance* filament_material_create_instance(Material* material) {
     return material->createInstance();
 }
 
+void filament_engine_destroy_material_instance(
+    Engine* engine,
+    MaterialInstance* instance
+) {
+    if (!engine || !instance) {
+        return;
+    }
+    engine->destroy(instance);
+}
+
 const char* filament_material_instance_get_name(MaterialInstance* instance) {
     if (!instance) {
         return nullptr;
@@ -531,6 +542,38 @@ bool filament_material_instance_set_texture_from_ktx(
     );
     instance->setParameter(name, texture, sampler);
     *out_texture = texture;
+    return true;
+}
+
+bool filament_material_instance_set_texture(
+    MaterialInstance* instance,
+    const char* name,
+    Texture* texture,
+    bool linear_filtering,
+    bool wrap_repeat_u,
+    bool wrap_repeat_v
+) {
+    if (!instance || !name || !texture) {
+        return false;
+    }
+    Material const* material = instance->getMaterial();
+    if (!material || !material->hasParameter(name)) {
+        return false;
+    }
+    TextureSampler sampler;
+    sampler.setMinFilter(
+        linear_filtering ? TextureSampler::MinFilter::LINEAR : TextureSampler::MinFilter::NEAREST
+    );
+    sampler.setMagFilter(
+        linear_filtering ? TextureSampler::MagFilter::LINEAR : TextureSampler::MagFilter::NEAREST
+    );
+    sampler.setWrapModeS(
+        wrap_repeat_u ? TextureSampler::WrapMode::REPEAT : TextureSampler::WrapMode::CLAMP_TO_EDGE
+    );
+    sampler.setWrapModeT(
+        wrap_repeat_v ? TextureSampler::WrapMode::REPEAT : TextureSampler::WrapMode::CLAMP_TO_EDGE
+    );
+    instance->setParameter(name, texture, sampler);
     return true;
 }
 
@@ -1745,6 +1788,38 @@ Texture* filament_texture_create_2d(
         .format(static_cast<Texture::InternalFormat>(internal_format))
         .usage(static_cast<Texture::Usage>(usage_flags))
         .build(*engine);
+}
+
+bool filament_texture_set_image_rgba8(
+    Engine* engine,
+    Texture* texture,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t* pixels,
+    uint32_t pixel_count_rgba8
+) {
+    if (!engine || !texture || !pixels || width == 0 || height == 0) {
+        return false;
+    }
+    const uint64_t required = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * 4ull;
+    if (required == 0 || required > pixel_count_rgba8) {
+        return false;
+    }
+
+    auto* owned = new uint8_t[required];
+    std::memcpy(owned, pixels, static_cast<size_t>(required));
+    auto pbd = backend::PixelBufferDescriptor(
+        owned,
+        static_cast<size_t>(required),
+        backend::PixelDataFormat::RGBA,
+        backend::PixelDataType::UBYTE,
+        [](void* buffer, size_t, void*) {
+            delete[] static_cast<uint8_t*>(buffer);
+        },
+        nullptr
+    );
+    texture->setImage(*engine, 0, std::move(pbd));
+    return true;
 }
 
 RenderTarget* filament_render_target_create(

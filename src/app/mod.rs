@@ -1,3 +1,4 @@
+mod egui_host;
 mod input;
 mod timing;
 
@@ -103,6 +104,29 @@ enum TransformToolMode {
 enum PickRequestKind {
     Select,
     HoverGizmo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiBackend {
+    ImGui,
+    Egui,
+}
+
+impl UiBackend {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "imgui" | "legacy" => Some(Self::ImGui),
+            "egui" => Some(Self::Egui),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ImGui => "imgui",
+            Self::Egui => "egui",
+        }
+    }
 }
 
 const GIZMO_NONE: i32 = 0;
@@ -316,6 +340,12 @@ impl HarnessState {
 
 pub struct App {
     window: Option<Arc<Window>>,
+    ui_backend: UiBackend,
+    egui_host: Option<egui_host::EguiHost>,
+    egui_wants_pointer: bool,
+    egui_wants_keyboard: bool,
+    egui_last_paint_error: Option<String>,
+    viewport_rect_px: Option<[f32; 4]>,
     assets: AssetManager,
     scene: SceneState,
     scene_runtime: SceneRuntime,
@@ -359,12 +389,18 @@ impl Drop for App {
 impl App {
     #[cfg(test)]
     fn new() -> Self {
-        Self::new_with_harness(None)
+        Self::new_with_harness(None, UiBackend::ImGui)
     }
 
-    fn new_with_harness(harness: Option<HarnessConfig>) -> Self {
+    fn new_with_harness(harness: Option<HarnessConfig>, ui_backend: UiBackend) -> Self {
         Self {
             window: None,
+            ui_backend,
+            egui_host: None,
+            egui_wants_pointer: false,
+            egui_wants_keyboard: false,
+            egui_last_paint_error: None,
+            viewport_rect_px: None,
             assets: AssetManager::new(),
             scene: SceneState::new(),
             scene_runtime: SceneRuntime::new(),
@@ -378,7 +414,7 @@ impl App {
             pending_pick_request: None,
             camera_drag_mode: None,
             camera_control_profile: CameraControlProfile::Blender,
-            transform_tool_mode: TransformToolMode::Translate,
+            transform_tool_mode: TransformToolMode::Select,
             gizmo_active_axis: 0,
             gizmo_hover_axis: 0,
             gizmo_drag_state: None,
@@ -403,7 +439,13 @@ impl App {
         self.orbit_pivot = [0.0, 0.0, 0.0];
         render.set_projection_for_window(window);
         self.camera.apply(render.camera_mut());
-        render.init_ui(window)?;
+        if self.ui_backend == UiBackend::ImGui {
+            render.init_ui(window)?;
+            render.set_ui_enabled(true);
+        } else {
+            render.set_ui_enabled(false);
+            render.init_egui_overlay(window)?;
+        }
 
         self.render = Some(render);
         Ok(())
@@ -454,12 +496,29 @@ impl App {
         if mx < 0.0 || my < 0.0 || mx > width || my > height {
             return false;
         }
+        if self.ui_backend == UiBackend::Egui {
+            let [vx, vy, vw, vh] = self.active_viewport_rect_px();
+            return mx < vx || mx > vx + vw || my < vy || my > vy + vh;
+        }
 
         // Keep in sync with side-pane layout in build_support/bindings.cpp.
         let left_width = width * 0.22;
         let right_width = width * 0.30;
         let gutter = 12.0;
         mx <= left_width || mx >= (width - right_width - gutter)
+    }
+
+    fn active_viewport_rect_px(&self) -> [f32; 4] {
+        if let Some(rect) = self.viewport_rect_px {
+            if rect[2] > 1.0 && rect[3] > 1.0 {
+                return rect;
+            }
+        }
+        let Some(window) = self.window.as_ref() else {
+            return [0.0, 0.0, 1.0, 1.0];
+        };
+        let size = window.inner_size();
+        [0.0, 0.0, size.width.max(1) as f32, size.height.max(1) as f32]
     }
 
     fn update_camera(&mut self) {
@@ -959,16 +1018,18 @@ impl App {
     }
 
     fn viewport_ray(&self, screen_x: f32, screen_y: f32) -> Option<([f32; 3], [f32; 3])> {
-        let window = self.window.as_ref()?;
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
+        let [vx, vy, vw, vh] = self.active_viewport_rect_px();
+        if vw <= 1.0 || vh <= 1.0 {
             return None;
         }
-        let width = size.width as f32;
-        let height = size.height as f32;
-        let ndc_x = (2.0 * screen_x / width) - 1.0;
-        let ndc_y = 1.0 - (2.0 * screen_y / height);
-        let aspect = width / height;
+        if screen_x < vx || screen_x > vx + vw || screen_y < vy || screen_y > vy + vh {
+            return None;
+        }
+        let local_x = screen_x - vx;
+        let local_y = screen_y - vy;
+        let ndc_x = (2.0 * local_x / vw) - 1.0;
+        let ndc_y = 1.0 - (2.0 * local_y / vh);
+        let aspect = vw / vh;
         let tan_half_fov = (45.0f32.to_radians() * 0.5).tan();
         let view_x = ndc_x * aspect * tan_half_fov;
         let view_y = ndc_y * tan_half_fov;
@@ -989,14 +1050,11 @@ impl App {
     }
 
     fn world_to_screen(&self, world: [f32; 3]) -> Option<[f32; 2]> {
-        let window = self.window.as_ref()?;
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
+        let [vx, vy, vw, vh] = self.active_viewport_rect_px();
+        if vw <= 1.0 || vh <= 1.0 {
             return None;
         }
-        let width = size.width as f32;
-        let height = size.height as f32;
-        let aspect = width / height;
+        let aspect = vw / vh;
         let tan_half_fov = (45.0f32.to_radians() * 0.5).tan();
         let rel = [
             world[0] - self.camera.position[0],
@@ -1015,8 +1073,8 @@ impl App {
         if !ndc_x.is_finite() || !ndc_y.is_finite() {
             return None;
         }
-        let screen_x = (ndc_x + 1.0) * 0.5 * width;
-        let screen_y = (1.0 - ndc_y) * 0.5 * height;
+        let screen_x = vx + (ndc_x + 1.0) * 0.5 * vw;
+        let screen_y = vy + (1.0 - ndc_y) * 0.5 * vh;
         Some([screen_x, screen_y])
     }
 
@@ -1099,7 +1157,11 @@ impl App {
                     }
                     SceneObjectKind::Light(data) => {
                         position = data.position;
-                        rotation = data.rotation_deg;
+                        rotation = if light_type_uses_direction(data.light_type) {
+                            rotation_deg_from_direction(data.direction)
+                        } else {
+                            data.rotation_deg
+                        };
                         scale = [1.0, 1.0, 1.0];
                         original_transform = Some((position, rotation, scale));
                         light_settings.color = data.color;
@@ -1128,7 +1190,7 @@ impl App {
                     SceneObjectKind::DirectionalLight(data) => {
                         let migrated = LightData::from_legacy_directional(data.clone());
                         position = migrated.position;
-                        rotation = migrated.rotation_deg;
+                        rotation = rotation_deg_from_direction(migrated.direction);
                         scale = [1.0, 1.0, 1.0];
                         original_transform = Some((position, rotation, scale));
                         light_settings.color = migrated.color;
@@ -1325,7 +1387,8 @@ impl App {
                     .harness
                     .as_ref()
                     .map(|h| h.config.include_ui)
-                    .unwrap_or(true);
+                    .unwrap_or(true)
+                    && self.ui_backend == UiBackend::ImGui;
                 render.set_ui_enabled(ui_enabled);
                 let (mx, my) = if self.window_focused {
                     self.mouse_pos.unwrap_or((-f32::MAX, -f32::MAX))
@@ -1408,72 +1471,518 @@ impl App {
                     render.execute_pick_pass(&pickable_entities);
                 }
 
-                let render_ms = render.render_scene_ui(
-                    "Assets",
-                    &ui_text,
-                    &object_names,
-                    &mut selected_index,
-                    &mut selected_kind,
-                    &mut can_edit_transform,
-                    &mut position,
-                    &mut rotation,
-                    &mut scale,
-                    &mut light_settings.color,
-                    &mut light_settings.intensity,
-                    &mut light_settings.direction,
-                    &mut light_settings.light_type,
-                    &mut light_settings.range,
-                    &mut light_settings.spot_inner_deg,
-                    &mut light_settings.spot_outer_deg,
-                    &mut light_settings.sun_angular_radius_deg,
-                    &mut light_settings.sun_halo_size,
-                    &mut light_settings.sun_halo_falloff,
-                    &mut light_settings.cast_shadows,
-                    &mut light_settings.shadow_map_size,
-                    &mut light_settings.shadow_cascades,
-                    &mut light_settings.shadow_far,
-                    &mut light_settings.shadow_near_hint,
-                    &mut light_settings.shadow_far_hint,
-                    &material_names,
-                    &mut selected_material_index,
-                    &mut material_params.base_color_rgba,
-                    &mut material_params.metallic,
-                    &mut material_params.roughness,
-                    &mut material_params.emissive_rgb,
-                    &material_binding_param_names,
-                    &mut material_binding_sources,
-                    260,
-                    &mut material_binding_wrap_repeat_u,
-                    &mut material_binding_wrap_repeat_v,
-                    &mut material_binding_srgb,
-                    &mut material_binding_uv_offset,
-                    &mut material_binding_uv_scale,
-                    &mut material_binding_uv_rotation_deg,
-                    &mut material_binding_pick_index,
-                    &mut material_binding_apply_index,
-                    hdr_path,
-                    ibl_path,
-                    skybox_path,
-                    &mut environment_pick_hdr,
-                    &mut environment_pick_ibl,
-                    &mut environment_pick_skybox,
-                    &mut environment_intensity,
-                    &mut environment_apply,
-                    &mut environment_generate,
-                    &mut create_gltf,
-                    &mut create_light_kind,
-                    &mut create_environment,
-                    &mut save_scene,
-                    &mut load_scene,
-                    &mut transform_tool_mode,
-                    &mut delete_selected,
-                    &gizmo_screen_points_xy,
-                    gizmo_visible,
-                    &gizmo_origin_world_xyz,
-                    &camera_world_xyz,
-                    &mut gizmo_active_axis,
-                    self.timing.frame_dt,
-                );
+                let render_ms = if self.ui_backend == UiBackend::ImGui {
+                    render.render_scene_ui(
+                        "Assets",
+                        &ui_text,
+                        &object_names,
+                        &mut selected_index,
+                        &mut selected_kind,
+                        &mut can_edit_transform,
+                        &mut position,
+                        &mut rotation,
+                        &mut scale,
+                        &mut light_settings.color,
+                        &mut light_settings.intensity,
+                        &mut light_settings.direction,
+                        &mut light_settings.light_type,
+                        &mut light_settings.range,
+                        &mut light_settings.spot_inner_deg,
+                        &mut light_settings.spot_outer_deg,
+                        &mut light_settings.sun_angular_radius_deg,
+                        &mut light_settings.sun_halo_size,
+                        &mut light_settings.sun_halo_falloff,
+                        &mut light_settings.cast_shadows,
+                        &mut light_settings.shadow_map_size,
+                        &mut light_settings.shadow_cascades,
+                        &mut light_settings.shadow_far,
+                        &mut light_settings.shadow_near_hint,
+                        &mut light_settings.shadow_far_hint,
+                        &material_names,
+                        &mut selected_material_index,
+                        &mut material_params.base_color_rgba,
+                        &mut material_params.metallic,
+                        &mut material_params.roughness,
+                        &mut material_params.emissive_rgb,
+                        &material_binding_param_names,
+                        &mut material_binding_sources,
+                        260,
+                        &mut material_binding_wrap_repeat_u,
+                        &mut material_binding_wrap_repeat_v,
+                        &mut material_binding_srgb,
+                        &mut material_binding_uv_offset,
+                        &mut material_binding_uv_scale,
+                        &mut material_binding_uv_rotation_deg,
+                        &mut material_binding_pick_index,
+                        &mut material_binding_apply_index,
+                        hdr_path,
+                        ibl_path,
+                        skybox_path,
+                        &mut environment_pick_hdr,
+                        &mut environment_pick_ibl,
+                        &mut environment_pick_skybox,
+                        &mut environment_intensity,
+                        &mut environment_apply,
+                        &mut environment_generate,
+                        &mut create_gltf,
+                        &mut create_light_kind,
+                        &mut create_environment,
+                        &mut save_scene,
+                        &mut load_scene,
+                        &mut transform_tool_mode,
+                        &mut delete_selected,
+                        &gizmo_screen_points_xy,
+                        gizmo_visible,
+                        &gizmo_origin_world_xyz,
+                        &camera_world_xyz,
+                        &mut gizmo_active_axis,
+                        self.timing.frame_dt,
+                    )
+                } else {
+                    let mut host_slot = self.egui_host.take();
+                    let mut egui_frame: Option<egui_host::EguiFrameOutput> = None;
+                    let mut viewport_rect_points: Option<egui::Rect> = None;
+                    let object_labels: Vec<String> = object_names
+                        .iter()
+                        .map(|value| value.to_string_lossy().to_string())
+                        .collect();
+                    let material_labels: Vec<String> = material_names
+                        .iter()
+                        .map(|value| value.to_string_lossy().to_string())
+                        .collect();
+                    let mut hdr_path_text = buffer_to_string(hdr_path);
+                    let mut ibl_path_text = buffer_to_string(ibl_path);
+                    let mut skybox_path_text = buffer_to_string(skybox_path);
+
+                    if let (Some(window), Some(host)) = (self.window.as_ref(), host_slot.as_mut()) {
+                        let frame = host.run_ui(window, |ctx| {
+                            egui::SidePanel::left("scene_panel")
+                                .resizable(true)
+                                .default_width(280.0)
+                                .min_width(220.0)
+                                .max_width(520.0)
+                                .show(ctx, |ui| {
+                                    ui.heading("Scene");
+                                    ui.separator();
+                                    if ui.button("Load GLTF...").clicked() {
+                                        create_gltf = true;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Dir").clicked() {
+                                            create_light_kind = 0;
+                                        }
+                                        if ui.button("Sun").clicked() {
+                                            create_light_kind = 1;
+                                        }
+                                        if ui.button("Point").clicked() {
+                                            create_light_kind = 2;
+                                        }
+                                        if ui.button("Spot").clicked() {
+                                            create_light_kind = 3;
+                                        }
+                                        if ui.button("Focused").clicked() {
+                                            create_light_kind = 4;
+                                        }
+                                    });
+                                    if ui.button("Add Environment").clicked() {
+                                        create_environment = true;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Save Scene...").clicked() {
+                                            save_scene = true;
+                                        }
+                                        if ui.button("Load Scene...").clicked() {
+                                            load_scene = true;
+                                        }
+                                    });
+                                    ui.separator();
+                                    ui.label("Hierarchy");
+                                    if object_labels.is_empty() {
+                                        ui.label("No objects loaded.");
+                                    } else {
+                                        egui::ScrollArea::vertical()
+                                            .max_height(320.0)
+                                            .show(ui, |ui| {
+                                                for (idx, label) in object_labels.iter().enumerate() {
+                                                    let selected = selected_index == idx as i32;
+                                                    if ui.selectable_label(selected, label).clicked() {
+                                                        selected_index = idx as i32;
+                                                    }
+                                                }
+                                            });
+                                    }
+                                });
+
+                            egui::SidePanel::right("inspector_panel")
+                                .resizable(true)
+                                .default_width(380.0)
+                                .min_width(300.0)
+                                .max_width(640.0)
+                                .show(ctx, |ui| {
+                                    ui.heading("Inspector");
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        ui.selectable_value(&mut transform_tool_mode, 0, "Select");
+                                        ui.selectable_value(&mut transform_tool_mode, 1, "Move");
+                                        ui.selectable_value(&mut transform_tool_mode, 2, "Rotate");
+                                        ui.selectable_value(&mut transform_tool_mode, 3, "Scale");
+                                    });
+                                    ui.add_enabled_ui(selected_index >= 0, |ui| {
+                                        if ui.button("Delete Selected").clicked() {
+                                            delete_selected = true;
+                                        }
+                                    });
+                                    ui.separator();
+
+                                    if can_edit_transform {
+                                        ui.collapsing("Transform", |ui| {
+                                            let label_w = 68.0;
+                                            let cell_w =
+                                                ((ui.available_width() - label_w - 16.0) / 3.0)
+                                                    .max(52.0);
+                                            egui::Grid::new("inspector_transform_grid")
+                                                .num_columns(4)
+                                                .spacing([6.0, 6.0])
+                                                .show(ui, |ui| {
+                                                    ui.add_sized(
+                                                        [label_w, 0.0],
+                                                        egui::Label::new("Position"),
+                                                    );
+                                                    for value in &mut position {
+                                                        ui.add_sized(
+                                                            [cell_w, 0.0],
+                                                            egui::DragValue::new(value).speed(0.01),
+                                                        );
+                                                    }
+                                                    ui.end_row();
+
+                                                    ui.add_sized(
+                                                        [label_w, 0.0],
+                                                        egui::Label::new("Rotation"),
+                                                    );
+                                                    for value in &mut rotation {
+                                                        ui.add_sized(
+                                                            [cell_w, 0.0],
+                                                            egui::DragValue::new(value).speed(0.2),
+                                                        );
+                                                    }
+                                                    ui.end_row();
+
+                                                    ui.add_sized(
+                                                        [label_w, 0.0],
+                                                        egui::Label::new("Scale"),
+                                                    );
+                                                    for value in &mut scale {
+                                                        ui.add_sized(
+                                                            [cell_w, 0.0],
+                                                            egui::DragValue::new(value).speed(0.01),
+                                                        );
+                                                    }
+                                                    ui.end_row();
+                                                });
+                                        });
+                                    }
+
+                                    if selected_kind == 1 {
+                                        ui.collapsing("Lighting", |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.add_sized([68.0, 0.0], egui::Label::new("Type"));
+                                                egui::ComboBox::from_id_salt("inspector_light_type")
+                                                    .selected_text(match light_settings.light_type {
+                                                        1 => "Sun",
+                                                        2 => "Point",
+                                                        3 => "Spot",
+                                                        4 => "Focused Spot",
+                                                        _ => "Directional",
+                                                    })
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(
+                                                            &mut light_settings.light_type,
+                                                            0,
+                                                            "Directional",
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut light_settings.light_type,
+                                                            1,
+                                                            "Sun",
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut light_settings.light_type,
+                                                            2,
+                                                            "Point",
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut light_settings.light_type,
+                                                            3,
+                                                            "Spot",
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut light_settings.light_type,
+                                                            4,
+                                                            "Focused Spot",
+                                                        );
+                                                    });
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.add_sized([68.0, 0.0], egui::Label::new("Color"));
+                                                ui.color_edit_button_rgb(&mut light_settings.color);
+                                            });
+                                            ui.add_sized(
+                                                [ui.available_width(), 0.0],
+                                                egui::Slider::new(
+                                                    &mut light_settings.intensity,
+                                                    0.0..=200_000.0,
+                                                )
+                                                .text("Intensity"),
+                                            );
+                                            let label_w = 68.0;
+                                            let cell_w =
+                                                ((ui.available_width() - label_w - 16.0) / 3.0)
+                                                    .max(52.0);
+                                            egui::Grid::new("inspector_light_direction_grid")
+                                                .num_columns(4)
+                                                .spacing([6.0, 6.0])
+                                                .show(ui, |ui| {
+                                                    ui.add_sized(
+                                                        [label_w, 0.0],
+                                                        egui::Label::new("Direction"),
+                                                    );
+                                                    for value in &mut light_settings.direction {
+                                                        ui.add_sized(
+                                                            [cell_w, 0.0],
+                                                            egui::DragValue::new(value).speed(0.01),
+                                                        );
+                                                    }
+                                                    ui.end_row();
+                                                });
+                                            ui.add_sized(
+                                                [ui.available_width(), 0.0],
+                                                egui::Slider::new(&mut light_settings.range, 0.01..=200.0)
+                                                    .text("Range"),
+                                            );
+                                            ui.checkbox(&mut light_settings.cast_shadows, "Cast Shadows");
+                                        });
+                                    }
+
+                                    let show_materials = selected_kind == 0;
+                                    let show_environment = selected_kind == 2;
+                                    let has_contextual_sections =
+                                        can_edit_transform || selected_kind == 1 || show_materials || show_environment;
+
+                                    if show_materials {
+                                        ui.collapsing("Materials", |ui| {
+                                            if material_labels.is_empty() {
+                                                ui.label("No materials loaded.");
+                                            } else {
+                                                egui::ComboBox::from_label("Material Slot")
+                                                    .selected_text(
+                                                        if selected_material_index >= 0 {
+                                                            material_labels
+                                                                .get(selected_material_index as usize)
+                                                                .cloned()
+                                                                .unwrap_or_else(|| "Select".to_string())
+                                                        } else {
+                                                            "Select".to_string()
+                                                        },
+                                                    )
+                                                    .show_ui(ui, |ui| {
+                                                        for (idx, label) in material_labels.iter().enumerate() {
+                                                            ui.selectable_value(
+                                                                &mut selected_material_index,
+                                                                idx as i32,
+                                                                label,
+                                                            );
+                                                        }
+                                                    });
+                                            }
+                                            ui.color_edit_button_rgba_unmultiplied(
+                                                &mut material_params.base_color_rgba,
+                                            );
+                                            ui.add(
+                                                egui::Slider::new(&mut material_params.metallic, 0.0..=1.0)
+                                                    .text("Metallic"),
+                                            );
+                                            ui.add(
+                                                egui::Slider::new(&mut material_params.roughness, 0.0..=1.0)
+                                                    .text("Roughness"),
+                                            );
+                                            ui.color_edit_button_rgb(&mut material_params.emissive_rgb);
+
+                                            for (row_index, param_name) in MATERIAL_TEXTURE_PARAMS.iter().enumerate() {
+                                                ui.separator();
+                                                ui.label(*param_name);
+                                                let start = row_index * 260;
+                                                let end = start + 260;
+                                                let mut source = buffer_to_string(&material_binding_sources[start..end]);
+                                                ui.horizontal(|ui| {
+                                                    let browse_w = 64.0;
+                                                    let apply_w = 56.0;
+                                                    let spacing = ui.spacing().item_spacing.x;
+                                                    let text_w = (ui.available_width()
+                                                        - browse_w
+                                                        - apply_w
+                                                        - spacing * 2.0)
+                                                        .max(120.0);
+                                                    if ui
+                                                        .add_sized(
+                                                            [text_w, 0.0],
+                                                            egui::TextEdit::singleline(&mut source),
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        write_string_to_buffer(
+                                                            &source,
+                                                            &mut material_binding_sources[start..end],
+                                                        );
+                                                    }
+                                                    if ui.add_sized([browse_w, 0.0], egui::Button::new("Browse")).clicked() {
+                                                        material_binding_pick_index = row_index as i32;
+                                                    }
+                                                    if ui.add_sized([apply_w, 0.0], egui::Button::new("Apply")).clicked() {
+                                                        material_binding_apply_index = row_index as i32;
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
+
+                                    if show_environment {
+                                        ui.collapsing("Environment", |ui| {
+                                            ui.horizontal(|ui| {
+                                                let button_w = 28.0;
+                                                ui.add_sized([68.0, 0.0], egui::Label::new("HDR"));
+                                                let text_w = (ui.available_width()
+                                                    - button_w
+                                                    - ui.spacing().item_spacing.x)
+                                                    .max(120.0);
+                                                ui.add_sized(
+                                                    [text_w, 0.0],
+                                                    egui::TextEdit::singleline(&mut hdr_path_text),
+                                                );
+                                                if ui.add_sized([button_w, 0.0], egui::Button::new("...")).clicked() {
+                                                    environment_pick_hdr = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                let button_w = 28.0;
+                                                ui.add_sized([68.0, 0.0], egui::Label::new("IBL"));
+                                                let text_w = (ui.available_width()
+                                                    - button_w
+                                                    - ui.spacing().item_spacing.x)
+                                                    .max(120.0);
+                                                ui.add_sized(
+                                                    [text_w, 0.0],
+                                                    egui::TextEdit::singleline(&mut ibl_path_text),
+                                                );
+                                                if ui.add_sized([button_w, 0.0], egui::Button::new("...")).clicked() {
+                                                    environment_pick_ibl = true;
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                let button_w = 28.0;
+                                                ui.add_sized([68.0, 0.0], egui::Label::new("Skybox"));
+                                                let text_w = (ui.available_width()
+                                                    - button_w
+                                                    - ui.spacing().item_spacing.x)
+                                                    .max(120.0);
+                                                ui.add_sized(
+                                                    [text_w, 0.0],
+                                                    egui::TextEdit::singleline(&mut skybox_path_text),
+                                                );
+                                                if ui.add_sized([button_w, 0.0], egui::Button::new("...")).clicked() {
+                                                    environment_pick_skybox = true;
+                                                }
+                                            });
+                                            ui.add_sized(
+                                                [ui.available_width(), 0.0],
+                                                egui::Slider::new(
+                                                    &mut environment_intensity,
+                                                    0.0..=200_000.0,
+                                                )
+                                                .text("Intensity"),
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Apply Environment").clicked() {
+                                                    environment_apply = true;
+                                                }
+                                                if ui.button("Generate IBL/Skybox").clicked() {
+                                                    environment_generate = true;
+                                                }
+                                            });
+                                        });
+                                    }
+
+                                    if !has_contextual_sections {
+                                        ui.label("No editable properties for current selection.");
+                                    }
+                                });
+
+                            egui::CentralPanel::default()
+                                .frame(egui::Frame::NONE)
+                                .show(ctx, |ui| {
+                                    viewport_rect_points = Some(ui.max_rect());
+                                });
+                        });
+                        self.egui_wants_pointer = frame.wants_pointer_input;
+                        self.egui_wants_keyboard = frame.wants_keyboard_input;
+                        egui_frame = Some(frame);
+                    } else {
+                        self.egui_wants_pointer = false;
+                        self.egui_wants_keyboard = false;
+                    }
+
+                    write_string_to_buffer(&hdr_path_text, hdr_path);
+                    write_string_to_buffer(&ibl_path_text, ibl_path);
+                    write_string_to_buffer(&skybox_path_text, skybox_path);
+
+                    if let (Some(rect), Some(frame)) = (viewport_rect_points, egui_frame.as_ref()) {
+                        let ppp = frame.pixels_per_point.max(0.01);
+                        let left = (rect.min.x * ppp).max(0.0);
+                        let top = (rect.min.y * ppp).max(0.0);
+                        let width = (rect.width() * ppp).max(1.0);
+                        let height = (rect.height() * ppp).max(1.0);
+                        self.viewport_rect_px = Some([left, top, width, height]);
+                        render.set_scene_viewport_top_left(
+                            left as u32,
+                            top as u32,
+                            width as u32,
+                            height as u32,
+                        );
+                    } else if let Some(window) = self.window.as_ref() {
+                        let size = window.inner_size();
+                        self.viewport_rect_px =
+                            Some([0.0, 0.0, size.width as f32, size.height as f32]);
+                        render.set_scene_viewport_top_left(0, 0, size.width, size.height);
+                    }
+
+                    let egui_overlay_error = if let Some(frame) = egui_frame.as_ref() {
+                        render
+                            .update_egui_overlay(
+                                &frame.clipped_primitives,
+                                &frame.textures_delta,
+                                frame.pixels_per_point,
+                                frame.screen_size_px,
+                            )
+                            .err()
+                    } else {
+                        None
+                    };
+                    let render_ms = render.render_frame_with_overlay(|| {});
+                    if let Some(err) = egui_overlay_error {
+                        let should_log = self
+                            .egui_last_paint_error
+                            .as_ref()
+                            .map_or(true, |prev| prev != &err);
+                        if should_log {
+                            log::warn!("egui overlay update failed: {}", err);
+                        }
+                        self.egui_last_paint_error = Some(err);
+                    } else {
+                        self.egui_last_paint_error = None;
+                    }
+                    self.egui_host = host_slot;
+                    render_ms
+                };
                 self.timing.set_render_ms(render_ms);
                 log::debug!(
                     "Editor state post-ui: selection_id={:?} selected_index_ui={} normalized_selection_index={:?} object_count={} gizmo_visible={} gizmo_active_axis={} gizmo_hover_axis={} pending_pick_request={:?}",
@@ -1710,35 +2219,44 @@ impl App {
         }
 
         if let Some(render) = &mut self.render {
+            let transform_changed = can_edit_transform
+                && original_transform
+                    .map(|(old_position, old_rotation, old_scale)| {
+                        old_position != position || old_rotation != rotation || old_scale != scale
+                    })
+                    .unwrap_or(false);
+
             render.set_selected_entity(selected_runtime_entity);
             render.set_selected_outline_params(selected_outline_params);
             render.set_selected_renderables(&selected_renderables);
             if let Some(entity) = selected_light_entity {
-                let live_light = light_settings_to_light_data(light_settings, position, rotation);
+                let mut live_light = light_settings_to_light_data(light_settings, position, rotation);
+                if transform_changed && light_type_uses_direction(live_light.light_type) {
+                    live_light.direction = direction_from_rotation_deg(rotation);
+                    live_light.rotation_deg = rotation_deg_from_direction(live_light.direction);
+                }
                 render.set_light(entity, scene_light_to_filament_params(&live_light));
             }
             if self.selection_id == previous_selection_id {
                 if let Some(selected) = current_selection_index {
                     if can_edit_transform {
-                        if let Some((old_position, old_rotation, old_scale)) =
-                            original_transform
-                        {
-                            if old_position != position
-                                || old_rotation != rotation
-                                || old_scale != scale
-                            {
-                                pending_transform_command = Some(SceneCommand::TransformNode {
-                                    index: selected,
-                                    position,
-                                    rotation_deg: rotation,
-                                    scale,
-                                });
-                            }
+                        if transform_changed {
+                            pending_transform_command = Some(SceneCommand::TransformNode {
+                                index: selected,
+                                position,
+                                rotation_deg: rotation,
+                                scale,
+                            });
                         }
                     }
 
                     if let Some(old_light) = &original_light_data {
-                        let new_light = light_settings_to_light_data(light_settings, position, rotation);
+                        let mut new_light =
+                            light_settings_to_light_data(light_settings, position, rotation);
+                        if transform_changed && light_type_uses_direction(new_light.light_type) {
+                            new_light.direction = direction_from_rotation_deg(rotation);
+                            new_light.rotation_deg = rotation_deg_from_direction(new_light.direction);
+                        }
                         if old_light != &new_light {
                             pending_update_light_command = Some(SceneCommand::UpdateLight {
                                 index: selected,
@@ -2393,6 +2911,22 @@ impl App {
         name: &str,
         data: LightData,
     ) -> Result<CommandOutcome, CommandError> {
+        if matches!(data.light_type, LightType::Directional | LightType::Sun) {
+            let has_existing_directional = self.scene.objects().iter().any(|object| match &object.kind {
+                SceneObjectKind::Light(light) => {
+                    matches!(light.light_type, LightType::Directional | LightType::Sun)
+                }
+                SceneObjectKind::DirectionalLight(_) => true,
+                _ => false,
+            });
+            if has_existing_directional {
+                return Ok(CommandOutcome::Notice(CommandNotice {
+                    severity: CommandSeverity::Warning,
+                    message: "Filament supports a single active Directional/Sun light. Use Spot or Point for additional key/fill lights.".to_string(),
+                }));
+            }
+        }
+
         let Some(render) = &mut self.render else {
             return Err(CommandError::RenderNotInitialized);
         };
@@ -3292,6 +3826,12 @@ mod tests {
     }
 
     #[test]
+    fn default_transform_tool_is_select() {
+        let app = App::new();
+        assert_eq!(app.transform_tool_mode, TransformToolMode::Select);
+    }
+
+    #[test]
     fn delete_light_resets_gizmo_state_and_keeps_fallback_selection() {
         let mut app = App::new();
         let asset_id = app.scene.reserve_object_id();
@@ -3929,6 +4469,11 @@ fn light_settings_to_light_data(
     {
         direction = direction_from_rotation_deg(rotation_deg);
     }
+    let resolved_rotation = if light_type_uses_direction(light_type) {
+        rotation_deg_from_direction(direction)
+    } else {
+        rotation_deg
+    };
     let cast_shadows = if matches!(light_type, LightType::Point) {
         false
     } else {
@@ -3939,7 +4484,7 @@ fn light_settings_to_light_data(
         color: settings.color,
         intensity: settings.intensity,
         position,
-        rotation_deg,
+        rotation_deg: resolved_rotation,
         direction,
         range: settings.range.max(0.01),
         spot_inner_deg: settings.spot_inner_deg.max(0.5),
@@ -4022,6 +4567,9 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        if self.ui_backend == UiBackend::Egui {
+            self.egui_host = Some(egui_host::EguiHost::new(&window));
+        }
         self.update_target_frame_duration(&window);
         if start_minimized {
             window.set_minimized(true);
@@ -4035,6 +4583,15 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        let egui_consumed = if self.ui_backend == UiBackend::Egui {
+            if let (Some(window), Some(host)) = (self.window.as_ref(), self.egui_host.as_mut()) {
+                host.on_window_event(window, &event)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         match event {
             WindowEvent::CloseRequested => {
                 self.close_requested = true;
@@ -4053,24 +4610,26 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let pressed = event.state == winit::event::ElementState::Pressed;
-                let mut ui_capture_keyboard = false;
+                let mut ui_capture_keyboard = self.egui_wants_keyboard;
 
                 let modifiers = self.modifiers;
-                if let Some(render) = &mut self.render {
-                    Self::sync_imgui_modifiers(render, modifiers);
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        if let Some(imgui_key) = Self::map_imgui_key(code) {
-                            render.ui_key_event(imgui_key, pressed);
-                        }
-                    }
-                    if pressed {
-                        if let Some(text) = event.text.as_ref() {
-                            for ch in text.chars() {
-                                render.ui_add_input_character(ch as u32);
+                if self.ui_backend == UiBackend::ImGui {
+                    if let Some(render) = &mut self.render {
+                        Self::sync_imgui_modifiers(render, modifiers);
+                        if let PhysicalKey::Code(code) = event.physical_key {
+                            if let Some(imgui_key) = Self::map_imgui_key(code) {
+                                render.ui_key_event(imgui_key, pressed);
                             }
                         }
+                        if pressed {
+                            if let Some(text) = event.text.as_ref() {
+                                for ch in text.chars() {
+                                    render.ui_add_input_character(ch as u32);
+                                }
+                            }
+                        }
+                        ui_capture_keyboard = render.ui_want_capture_keyboard();
                     }
-                    ui_capture_keyboard = render.ui_want_capture_keyboard();
                 }
 
                 if !ui_capture_keyboard {
@@ -4119,8 +4678,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
-                if let Some(render) = &mut self.render {
-                    Self::sync_imgui_modifiers(render, modifiers);
+                if self.ui_backend == UiBackend::ImGui {
+                    if let Some(render) = &mut self.render {
+                        Self::sync_imgui_modifiers(render, modifiers);
+                    }
                 }
             }
             WindowEvent::Resized(new_size) => {
@@ -4156,12 +4717,21 @@ impl ApplicationHandler for App {
                 let prev_pos = self.mouse_pos;
                 self.mouse_pos = Some(new_pos);
                 let over_sidebar_ui = self.mouse_over_sidebar_ui();
-                let mut ui_capture_mouse = false;
-                if let Some(render) = &mut self.render {
-                    render.ui_mouse_pos(new_pos.0, new_pos.1);
-                    ui_capture_mouse = render.ui_want_capture_mouse();
+                let mut ui_capture_mouse = if self.ui_backend == UiBackend::Egui {
+                    egui_consumed || self.egui_wants_pointer
+                } else {
+                    false
+                };
+                if self.ui_backend == UiBackend::ImGui {
+                    if let Some(render) = &mut self.render {
+                        render.ui_mouse_pos(new_pos.0, new_pos.1);
+                        ui_capture_mouse = render.ui_want_capture_mouse();
+                    }
                 }
-                if !(over_sidebar_ui || ui_capture_mouse) {
+                let allow_scene_interaction = !(over_sidebar_ui || ui_capture_mouse)
+                    || self.gizmo_drag_state.is_some()
+                    || self.camera_drag_mode.is_some();
+                if allow_scene_interaction {
                     if self.mouse_buttons[0] && self.gizmo_active_axis != 0 {
                         self.begin_gizmo_drag_if_needed(new_pos);
                         self.apply_transform_tool_drag(new_pos);
@@ -4177,9 +4747,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorEntered { .. } => {
-                if let Some(render) = &mut self.render {
-                    if let Some((mx, my)) = self.mouse_pos {
-                        render.ui_mouse_pos(mx, my);
+                if self.ui_backend == UiBackend::ImGui {
+                    if let Some(render) = &mut self.render {
+                        if let Some((mx, my)) = self.mouse_pos {
+                            render.ui_mouse_pos(mx, my);
+                        }
                     }
                 }
             }
@@ -4190,8 +4762,10 @@ impl ApplicationHandler for App {
                 self.gizmo_hover_axis = GIZMO_NONE;
                 self.pending_click_select = false;
                 self.pending_pick_request = None;
-                if let Some(render) = &mut self.render {
-                    render.ui_mouse_pos(-f32::MAX, -f32::MAX);
+                if self.ui_backend == UiBackend::ImGui {
+                    if let Some(render) = &mut self.render {
+                        render.ui_mouse_pos(-f32::MAX, -f32::MAX);
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -4201,10 +4775,16 @@ impl ApplicationHandler for App {
                         self.mouse_buttons[button_index as usize] = pressed;
                     }
                     let over_sidebar_ui = self.mouse_over_sidebar_ui();
-                    let mut ui_capture_mouse = false;
-                    if let Some(render) = &mut self.render {
-                        render.ui_mouse_button(button_index, pressed);
-                        ui_capture_mouse = render.ui_want_capture_mouse();
+                    let mut ui_capture_mouse = if self.ui_backend == UiBackend::Egui {
+                        egui_consumed || self.egui_wants_pointer
+                    } else {
+                        false
+                    };
+                    if self.ui_backend == UiBackend::ImGui {
+                        if let Some(render) = &mut self.render {
+                            render.ui_mouse_button(button_index, pressed);
+                            ui_capture_mouse = render.ui_want_capture_mouse();
+                        }
                     }
                     if !(over_sidebar_ui || ui_capture_mouse) {
                         match self.camera_control_profile {
@@ -4269,12 +4849,19 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(x, y) => (x, y),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
-                let mut ui_capture_mouse = false;
-                if let Some(render) = &mut self.render {
-                    render.ui_mouse_wheel(wheel_x, wheel_y);
-                    ui_capture_mouse = render.ui_want_capture_mouse();
+                let over_sidebar_ui = self.mouse_over_sidebar_ui();
+                let mut ui_capture_mouse = if self.ui_backend == UiBackend::Egui {
+                    egui_consumed || self.egui_wants_pointer
+                } else {
+                    false
+                };
+                if self.ui_backend == UiBackend::ImGui {
+                    if let Some(render) = &mut self.render {
+                        render.ui_mouse_wheel(wheel_x, wheel_y);
+                        ui_capture_mouse = render.ui_want_capture_mouse();
+                    }
                 }
-                if !ui_capture_mouse && !self.mouse_over_sidebar_ui() {
+                if !ui_capture_mouse && !over_sidebar_ui {
                     self.dolly_camera(wheel_y * 0.15);
                 }
             }
@@ -4568,6 +5155,25 @@ fn parse_harness_config_from_args() -> Result<Option<HarnessConfig>, String> {
     }))
 }
 
+fn parse_ui_backend_from_args() -> UiBackend {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--ui-backend" {
+            if let Some(value) = args.next() {
+                if let Some(parsed) = UiBackend::from_str(&value) {
+                    return parsed;
+                }
+                log::warn!(
+                    "Unknown --ui-backend '{}'; expected 'egui' or 'imgui'. Falling back to egui.",
+                    value
+                );
+                return UiBackend::Egui;
+            }
+        }
+    }
+    UiBackend::Egui
+}
+
 fn parse_vec3_arg(value: &str, flag: &str) -> Result<[f32; 3], String> {
     let parts: Vec<&str> = value.split(',').map(|part| part.trim()).collect();
     if parts.len() != 3 {
@@ -4597,8 +5203,10 @@ pub fn run() {
             return;
         }
     };
+    let ui_backend = parse_ui_backend_from_args();
 
     log::info!("🚀 Previz - Filament v1.69.0 Renderer POC");
+    log::info!("   UI backend: {}", ui_backend.as_str());
     log::info!("   Press ESC or close window to exit");
     if let Some(config) = &harness_config {
         log::info!(
@@ -4636,7 +5244,7 @@ pub fn run() {
     };
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new_with_harness(harness_config);
+    let mut app = App::new_with_harness(harness_config, ui_backend);
     if let Err(err) = event_loop.run_app(&mut app) {
         let message = format!("Event loop error: {err}");
         log::error!("{message}");
